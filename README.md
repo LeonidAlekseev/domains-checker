@@ -33,6 +33,8 @@ whois. No `dig` or `curl` needed.
 - 🔎 **whois / RDAP for the rest**: `whois.ru` for `.ru` `.su` `.рф`, RDAP (IANA bootstrap) for zones that have it, the
   registry's port 43 whois for all others, to catch registered domains with no NS answer.
 - 🌍 **Any zone**: `--tld ru,com,app`; Cyrillic names and zones (`рф`) work.
+- 🖥️ **Live log**: spinner and progress bar per stage, ETA, counters, each `FREE` shown as it is found.
+- 💾 **FREE saved at once**: every `FREE` goes to a file the moment it is found, nothing is lost on a crash or Ctrl+C.
 - 🔁 **Retries**: a whois request is retried up to 3 times; names that still fail are marked `ERR`.
 - 📦 **Single binary**: builds for Linux, macOS and Windows.
 
@@ -44,7 +46,7 @@ whois. No `dig` or `curl` needed.
 #   put it on your PATH as domains-checker
 
 # Option 2: from JSR (needs Deno 2+)
-deno install -g -n domains-checker --allow-net --allow-env=CONS,VOWS,WHOIS_P --allow-read=/dev/tty,CONIN$ \
+deno install -g -n domains-checker --allow-net --allow-env=CONS,VOWS,WHOIS_P --allow-read=/dev/tty,CONIN$ --allow-write \
   jsr:@leonidalekseev/domains-checker
 
 # Option 3: from source (needs Deno 2+)
@@ -71,7 +73,7 @@ grep ^FREE result.txt
 
 ```sh
 domains-checker gen MASK [--nice]   # print names matching the mask
-domains-checker check [--tld ru,com]  # read names from stdin, print one result line per domain
+domains-checker check [--tld ru,com] [--out FILE]  # read names from stdin, print one result line per domain
 domains-checker --help              # also: --version
 ```
 
@@ -117,6 +119,24 @@ registry request. Requests use punycode, output keeps what you typed.
 
 `FREE` means unregistered: premium or reserved names may still be unavailable. `FREE` is never printed without a
 registry answer. Lines are sorted. Free names only: `grep ^FREE result.txt`.
+
+### FREE file and terminal output
+
+Every `FREE` is appended to a file the moment it is found and flushed to disk: `--out FILE`, by default
+`free-YYYYMMDD-HHMMSS.txt` in the current directory. One domain per line. The file is created on the first `FREE`, so a
+run with none leaves nothing; an existing `--out` file is appended to, never truncated.
+
+When stderr is a terminal it shows a header, a progress bar per stage (done / total, percent, ETA, counters), each
+`FREE` as it is found and a final summary. `NO_COLOR` turns colours off. Without a terminal there are only plain
+messages. stdout piped or redirected gets all sorted lines, without colours. When both are a terminal, `FREE` lines are
+not repeated at the end.
+
+### Interrupt
+
+The first Ctrl+C (SIGINT, or SIGTERM where supported) stops at once: no new requests start, later stages are skipped, an
+open captcha prompt ends and slow requests are not waited for. Finished results go to stdout as usual, the summary says
+how many names were not checked, the exit code is 130. A second Ctrl+C exits immediately. `FREE` already written stays
+on disk either way.
 
 ### Environment variables
 
@@ -207,6 +227,8 @@ src/main.ts    CLI: arguments, help, gen and check commands
 src/gen.ts     mask expansion and .ru name rules
 src/nice.ts    the --nice heuristic
 src/check.ts   DNS, whois.ru and RDAP checks, result parsing
+src/run.ts     one check run: FREE file, result lines, exit code
+src/ui.ts      the stderr log: progress bars, messages, summary
 src/whois43.ts port 43 whois: query and the pattern table
 tests/         unit tests, real registry answers in tests/fixtures/whois43
 ```

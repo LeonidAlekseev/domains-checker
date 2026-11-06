@@ -1,7 +1,7 @@
 import type { CaptchaChoice } from "./check.ts";
 
 /** Ask on the controlling terminal (stdin is a pipe in `gen | check`). No terminal: "no-terminal". */
-export async function ttyPrompt(link: string): Promise<CaptchaChoice> {
+export async function ttyPrompt(link: string, say: (message: string) => void = console.error): Promise<CaptchaChoice> {
   let tty: Deno.FsFile;
   try {
     tty = await Deno.open(Deno.build.os === "windows" ? "CONIN$" : "/dev/tty", { read: true });
@@ -9,9 +9,9 @@ export async function ttyPrompt(link: string): Promise<CaptchaChoice> {
     return "no-terminal";
   }
   try {
-    console.error(`captcha: open ${link} in a browser and pass it.`);
+    say(`captcha: open ${link} in a browser and pass it.`);
     while (true) {
-      console.error("Press Enter to continue, q + Enter to stop: ");
+      say("Press Enter to continue, q + Enter to stop: ");
       const buf = new Uint8Array(256);
       const n = await tty.read(buf);
       if (n === null) return "stop"; // EOF
