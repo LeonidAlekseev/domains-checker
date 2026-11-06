@@ -8,9 +8,9 @@ export interface Sets {
 const LETTERS = [..."abcdefghijklmnopqrstuvwxyz"];
 const DIGITS = [..."0123456789"];
 
-/** Default letter sets: five vowels, the other 21 letters as consonants. */
+/** Default letter sets: six vowels (y included), the other 20 letters as consonants. */
 export function defaultSets(): Sets {
-  const vows = [..."aeiou"];
+  const vows = [..."aeiouy"];
   return { cons: LETTERS.filter((l) => !vows.includes(l)), vows };
 }
 
