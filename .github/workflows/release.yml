@@ -22,7 +22,7 @@ jobs:
         run: |
           for target in x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu \
                         x86_64-apple-darwin aarch64-apple-darwin x86_64-pc-windows-msvc; do
-            deno compile --allow-net=1.1.1.1,whois.ru --allow-env=CONS,VOWS,WHOIS_P \
+            deno compile --allow-net --allow-env=CONS,VOWS,WHOIS_P --allow-read=/dev/tty,CONIN$ \
               --target "$target" -o "dist/domains-checker-$target" src/main.ts
           done
       - name: GitHub Release
