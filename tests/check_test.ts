@@ -3,6 +3,7 @@ import {
   asciiDomain,
   check,
   delegated,
+  maskProxy,
   parseBootstrap,
   parseNames,
   parseWhois,
@@ -26,11 +27,21 @@ Deno.test("parseNames: separators, lowercase, filter, dedupe; dotted names and I
 });
 
 Deno.test("toDomains: dotless names get every zone, dotted names stay as is, deduped", () => {
-  assertEquals(toDomains(["teef", "a.org", "teef.ru"], ["ru", "com"]), [
-    "teef.ru",
-    "teef.com",
-    "a.org",
-  ]);
+  assertEquals(toDomains(["teef", "a.org", "teef.ru"], ["ru", "com"]), {
+    domains: ["teef.ru", "teef.com", "a.org"],
+    unknown: [],
+  });
+});
+
+Deno.test("toDomains: more than one dot is checkable only as <label>.<--tld zone>", () => {
+  assertEquals(toDomains(["teef", "a.b.com", "x.co.uk", "y.b.co.uk"], ["co.uk"]), {
+    domains: ["teef.co.uk", "x.co.uk"],
+    unknown: ["a.b.com", "y.b.co.uk"],
+  });
+});
+
+Deno.test("toDomains: a Unicode --tld zone with a dot still counts", () => {
+  assertEquals(toDomains(["teef"], ["co.рф"]), { domains: ["teef.co.рф"], unknown: [] });
 });
 
 Deno.test("asciiDomain and zoneOf use punycode", () => {
@@ -59,18 +70,43 @@ Deno.test("retryAfterMs: seconds, http date, junk", () => {
   assertEquals(retryAfterMs(null, 0), undefined);
 });
 
-Deno.test("parseWhois: free", () => {
-  assertEquals(parseWhois("<p>Домен <b>свободен</b></p>"), { kind: "free" });
+Deno.test("parseWhois: free needs the verdict for this very domain", () => {
+  assertEquals(parseWhois("<p>Домен <b>a.ru</b>\n  свободен</p>", "a.ru"), { kind: "free" });
+  assertEquals(parseWhois("<p>Домен <b>тест.рф</b> свободен</p>", "тест.рф"), { kind: "free" });
+  assertEquals(parseWhois("<p>Домен <b>xn--e1aybc.xn--p1ai</b> свободен</p>", "тест.рф"), { kind: "free" });
+  assertEquals(parseWhois("<p>Домен <b>b.ru</b> свободен</p>", "a.ru"), { kind: "unknown" });
+  assertEquals(parseWhois("<nav>Освободен от налога</nav><p>свободен</p>", "a.ru"), { kind: "unknown" });
 });
+
+Deno.test("parseWhois: captcha wins over a verdict, state wins over a verdict", () => {
+  assertEquals(parseWhois("<p>Домен a.ru свободен</p><p>защиту от роботов</p>", "a.ru"), { kind: "captcha" });
+  assertEquals(parseWhois("<p>Домен a.ru свободен</p>\nstate: X", "a.ru"), { kind: "taken", state: "X" });
+});
+
+// Real whois.ru pages (csrf token stripped), see tests/fixtures/whoisru.
+const ruPage = (name: string) => Deno.readTextFileSync(new URL(`./fixtures/whoisru/${name}.html`, import.meta.url));
+for (
+  const [z, free, taken] of [["ru", "zq7xkvw3jf9xq.ru", "yandex.ru"], ["su", "zq7xkvw3jf9xq.su", "nic.su"], [
+    "rf",
+    "ъъщзжфыв.рф",
+    "президент.рф",
+  ]]
+) {
+  Deno.test(`parseWhois: real ${z} pages`, () => {
+    assertEquals(parseWhois(ruPage(`${z}.free`), free), { kind: "free" });
+    assertEquals(parseWhois(ruPage(`${z}.taken`), taken), { kind: "taken", state: "REGISTERED, DELEGATED, VERIFIED" });
+    assertEquals(parseWhois(ruPage(`${z}.free`), taken).kind, "unknown"); // a verdict for another name
+  });
+}
 
 Deno.test("parseWhois: taken uses first state line", () => {
   const html = "<pre>domain: X.RU\nstate:  REGISTERED, DELEGATED, VERIFIED\nstate: other</pre>";
-  assertEquals(parseWhois(html), { kind: "taken", state: "REGISTERED, DELEGATED, VERIFIED" });
+  assertEquals(parseWhois(html, "x.ru"), { kind: "taken", state: "REGISTERED, DELEGATED, VERIFIED" });
 });
 
 Deno.test("parseWhois: captcha and unknown", () => {
-  assertEquals(parseWhois("<p>Мы защиту от роботов включили</p>"), { kind: "captcha" });
-  assertEquals(parseWhois("<html>oops</html>"), { kind: "unknown" });
+  assertEquals(parseWhois("<p>Мы защиту от роботов включили</p>", "a.ru"), { kind: "captcha" });
+  assertEquals(parseWhois("<html>oops</html>", "a.ru"), { kind: "unknown" });
 });
 
 Deno.test("sortLines is byte order", () => {
@@ -109,7 +145,7 @@ Deno.test("delegated: second attempt can succeed", async () => {
 
 // --- captcha flow: injected fetch and prompt, no network ---
 
-const FREE = "<p>свободен</p>";
+const FREE = "FREE"; // `fake` turns it into the verdict page for the requested domain
 const CAPTCHA = "<p>защиту от роботов</p>";
 const page = (html: string) => Promise.resolve(new Response(html));
 
@@ -118,7 +154,10 @@ function fake(serve: (proxy: string | undefined, url: string, n: number) => stri
   const log: string[] = [];
   const fetcher = (proxy?: string) => (url: string | URL | Request) => {
     log.push(`${proxy ?? "-"}|${url}`);
-    return page(serve(proxy, String(url), log.length));
+    const html = serve(proxy, String(url), log.length);
+    return page(
+      html === FREE ? `<p>Домен <b>${decodeURI(new URL(String(url)).pathname.slice(1))}</b> свободен</p>` : html,
+    );
   };
   return { log, fetcher: fetcher as unknown as (proxy?: string) => typeof fetch };
 }
@@ -301,4 +340,37 @@ Deno.test("check: .su and .рф go to whois.ru, not to port 43", async () => {
   const out = await check(["a.su", "щ.рф"], 1, { ...quiet, fetcher, resolve: notDelegated, query });
   assertEquals(out, ["FREE a.su", "FREE щ.рф"]);
   assertEquals(log.map((l) => l.split("/").pop()), ["a.su", "xn--y1a.xn--p1ai"]);
+});
+
+Deno.test("whoisStage: a prompt that throws counts as stop, asked once", async () => {
+  const { log, fetcher } = fake(() => CAPTCHA);
+  let asked = 0;
+  const out = await whoisStage(["a.ru", "b.ru"], 1, {
+    ...quiet,
+    fetcher,
+    prompt: () => (asked++, Promise.reject(new Error("tty gone"))),
+  });
+  assertEquals(out, ["ERR a.ru", "ERR b.ru"]);
+  assertEquals([asked, log.length], [1, 1]);
+});
+
+Deno.test("maskProxy hides user and password", () => {
+  assertEquals(maskProxy("http://bob:s3cret@host:8080/"), "http://***:***@host:8080/");
+  assertEquals(maskProxy("socks5://tok@host:1080"), "socks5://***@host:1080");
+  assertEquals(maskProxy("http://host:8080"), "http://host:8080/");
+  assertEquals(maskProxy("not a url s3cret"), "<invalid proxy URL>");
+});
+
+Deno.test("whoisStage: the proxy switch message has no credentials", async () => {
+  const notes: string[] = [];
+  const orig = console.error;
+  console.error = (m: string) => notes.push(m);
+  try {
+    const { fetcher } = fake((proxy) => proxy ? FREE : CAPTCHA);
+    await whoisStage(["a.ru"], 1, { ...quiet, fetcher, proxies: ["http://bob:s3cret@host:8080"] });
+  } finally {
+    console.error = orig;
+  }
+  assertEquals(notes.length, 1);
+  assertEquals(notes[0].includes("s3cret") || notes[0].includes("bob"), false);
 });

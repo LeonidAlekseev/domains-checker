@@ -21,10 +21,35 @@ export function asciiDomain(domain: string): string {
 
 export const zoneOf = (domain: string) => asciiDomain(domain).split(".").pop()!;
 
-/** A name without a dot is checked in every zone, a name with a dot as is; invalid hosts are dropped. */
-export function toDomains(names: string[], zones: string[]): string[] {
-  const all = names.flatMap((n) => n.includes(".") ? [n] : zones.map((z) => `${n}.${z}`));
-  return [...new Set(all)].filter((d) => asciiDomain(d));
+/**
+ * A name without a dot is checked in every zone. A name with a dot is checkable if it has exactly one dot
+ * or is `<label>.<zone>` for a --tld zone; every other name is `unknown`, and invalid hosts are dropped.
+ */
+export function toDomains(names: string[], zones: string[]): { domains: string[]; unknown: string[] } {
+  const domains = new Set<string>();
+  const unknown = new Set<string>();
+  const inZone = (d: string) =>
+    zones.map(asciiDomain).some((z) => d.endsWith(`.${z}`) && !d.slice(0, -z.length - 1).includes("."));
+  for (const n of names) {
+    for (const d of n.includes(".") ? [n] : zones.map((z) => `${n}.${z}`)) {
+      const ascii = asciiDomain(d);
+      if (!ascii) continue;
+      (ascii.split(".").length === 2 || inZone(ascii) ? domains : unknown).add(d);
+    }
+  }
+  return { domains: [...domains], unknown: [...unknown] };
+}
+
+/** A proxy URL for messages: user and password replaced by ***. */
+export function maskProxy(proxy: string): string {
+  try {
+    const u = new URL(proxy);
+    if (u.username) u.username = "***";
+    if (u.password) u.password = "***";
+    return u.href;
+  } catch {
+    return "<invalid proxy URL>";
+  }
 }
 
 /** IANA RDAP bootstrap (dns.json) to a tld -> base URL map (trailing slash ensured). */
@@ -46,14 +71,19 @@ export function retryAfterMs(header: string | null, now = Date.now()): number | 
   return isNaN(at) ? undefined : Math.max(0, at - now);
 }
 
-/** Parse a whois.ru page: tags stripped, then free / first `state:` / captcha, in that order. */
-export function parseWhois(html: string): Whois {
+/**
+ * Parse a whois.ru page: tags stripped, then captcha / first `state:` / the verdict
+ * `Домен <name> свободен` for this very domain (the page shows .рф names in Unicode), in that order.
+ */
+export function parseWhois(html: string, domain: string): Whois {
   const lines = html.replace(/<[^>]*>/g, "\n").split("\n");
-  const text = lines.join("\n");
-  if (text.includes("свободен")) return { kind: "free" };
+  if (lines.some((l) => l.includes("защиту от роботов"))) return { kind: "captcha" };
   const state = lines.find((l) => l.includes("state:"));
   if (state) return { kind: "taken", state: state.split(":")[1].trim() };
-  if (text.includes("защиту от роботов")) return { kind: "captcha" };
+  const text = lines.join(" ").replace(/\s+/g, " ").toLowerCase();
+  if ([domain, asciiDomain(domain)].some((d) => text.includes(`домен ${d.toLowerCase()} свободен`))) {
+    return { kind: "free" };
+  }
   return { kind: "unknown" };
 }
 
@@ -138,10 +168,15 @@ export async function whoisStage(domains: string[], parallel: number, o: WhoisOp
     resolving ??= (async () => {
       const proxy = proxies.shift();
       if (proxy) {
-        console.error(`captcha: whois.ru blocked, switching to proxy ${proxy}`);
+        console.error(`captcha: whois.ru blocked, switching to proxy ${maskProxy(proxy)}`);
         doFetch = fetcher(proxy);
       } else {
-        const choice = await prompt(`https://whois.ru/${asciiDomain(domain)}`);
+        let choice: CaptchaChoice;
+        try {
+          choice = await prompt(`https://whois.ru/${asciiDomain(domain)}`);
+        } catch {
+          choice = "stop"; // a broken prompt must not loop
+        }
         if (choice !== "continue") {
           stopped = true;
           console.error(
@@ -163,7 +198,7 @@ export async function whoisStage(domains: string[], parallel: number, o: WhoisOp
       const seen = epoch;
       try {
         const res = await doFetch(`https://whois.ru/${asciiDomain(domain)}`, { signal: AbortSignal.timeout(20_000) });
-        const w = parseWhois(await res.text());
+        const w = parseWhois(await res.text(), domain);
         if (w.kind === "free") return `FREE ${domain}`;
         if (w.kind === "taken") return `taken-whois ${domain} (${w.state})`;
         if (w.kind === "captcha") {
@@ -223,7 +258,10 @@ export async function whois43Stage(domains: string[], parallel: number, query: Q
     let s = servers.get(zone);
     if (!s) {
       s = query("whois.iana.org", zone).then(parseServer);
-      s.then((h) => h || console.error(`no whois server for .${zone}: its names stay UNKNOWN`), () => {});
+      s.then(
+        (h) => h || console.error(`no whois server for .${zone}: its names stay UNKNOWN`),
+        () => servers.delete(zone),
+      );
       servers.set(zone, s);
     }
     return s;

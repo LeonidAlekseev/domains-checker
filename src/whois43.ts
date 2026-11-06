@@ -42,12 +42,14 @@ export type Whois43 = { kind: "free" } | { kind: "taken"; state?: string } | { k
  * FREE needs a positive match here; a text that matches nothing is "unknown".
  */
 export const PATTERNS = {
+  // phrases for "no such domain": a whole line each, so "Not found: nameserver" never matches
   free: [
-    /^[%#\s]*(domain not found|no data found|no match|not found|no entries found|nothing found)/im, // general
+    /^[%#\s]*(domain not found|no data found|no match( for .*)?|no entries found( for the selected source)?|nothing found)[\s.!]*$/im,
     /^the queried object does not exist: domain not found/im, // .co .la
     /^domain "[^"]*" not found/im, // .se
-    /^status:\s*(free|available)\s*$/im, // .de .it .be .eu
   ],
+  // an explicit status verdict; a registry may print the Domain line next to it, so it wins over `taken`
+  freeStatus: [/^status:\s*(free|available)\s*$/im], // .de .it .be .eu
   limited: [
     /^[%#\s]*(\S+\s+){0,3}limit\b.*\b(exceeded|reached)/im, // "access control limit reached", "query limit exceeded"
     /^[%#\s]*(error\b.*\b(too many|refused)|too many (requests|queries|connections))/im,
@@ -61,8 +63,10 @@ const STATE = /^(?:domain )?(?:status|state):[ \t]*(.+)$/im;
 /** Classify a registry answer; a free verdict only comes from a positive pattern. */
 export function parseWhois43(text: string): Whois43 {
   if (PATTERNS.limited.some((re) => re.test(text))) return { kind: "limited" };
-  if (PATTERNS.free.some((re) => re.test(text))) return { kind: "free" };
-  if (!PATTERNS.taken.some((re) => re.test(text))) return { kind: "unknown" };
+  if (PATTERNS.freeStatus.some((re) => re.test(text))) return { kind: "free" };
+  const taken = PATTERNS.taken.some((re) => re.test(text));
+  if (PATTERNS.free.some((re) => re.test(text))) return taken ? { kind: "unknown" } : { kind: "free" }; // both: contradiction
+  if (!taken) return { kind: "unknown" };
   // untrusted text: one line, no control characters, cut to a sane length
   const state = text.match(STATE)?.[1].split(/\s+https?:/)[0].replace(/\p{C}/gu, "").trim().slice(0, 80);
   return state ? { kind: "taken", state } : { kind: "taken" };

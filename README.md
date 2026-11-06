@@ -100,7 +100,9 @@ consonants or two vowels in a row, and only common consonant clusters such as `s
 
 Names go to stdin, separated by spaces, commas or newlines. Letters (Cyrillic too), digits and `-` are accepted; case is
 ignored, duplicates are dropped. A name without a dot is checked in every `--tld` zone (comma-separated, default `ru`);
-a name with a dot (`teef.io`) is checked as is. Requests use punycode, output keeps what you typed.
+a name with exactly one dot (`teef.io`) is checked as is, and so is `<label>.<zone>` for a `--tld` zone (`--tld co.uk`
+with `teef` gives `teef.co.uk`). Any other multi-dot name (`a.b.com`) is `UNKNOWN`, with one note on stderr and no
+registry request. Requests use punycode, output keeps what you typed.
 
 ### Output format
 
@@ -142,7 +144,8 @@ CONS="b d l m n r t v" VOWS="a o e i" domains-checker gen CVCVC | domains-checke
    `taken-whois name (STATE)`. A refused connection, timeout, rate-limit or refusal text is `ERR`.
 
 **`UNKNOWN`** means no source could say: the zone has no whois server in IANA (one note per zone on stderr), or the
-registry answered with text no pattern recognises. `FREE` is never printed without a positive "not found" answer.
+registry answered with text no pattern recognises (or a reply that says both "taken" and "not found"), or the name has
+more than one dot and is not `<label>.<--tld zone>`. `FREE` is never printed without a positive "not found" answer.
 
 ## Troubleshooting
 
@@ -178,6 +181,12 @@ The mask allows only `C V D L A` and lowercase letters, digits and `-`.
 
 **Does it check other zones?** Yes: `--tld ru,com,app`. Zones without RDAP (for example `.io`, `.me`) go to the
 registry's port 43 whois; `UNKNOWN` stays only where it has no whois server or answers in an unknown format.
+
+**Why is a Latin name in `.рф` taken or `ERR`?** Latin letters are not valid in `.рф`, so whois.ru cannot check them:
+use Cyrillic names there.
+
+**Which zones failed in verification?** `.ch` and `.es` gave `ERR` when verified from our host: the registries refused
+the queries or timed out.
 
 **Why check DNS before whois?** It is fast and has no captcha. whois.ru is slower and limited, so it only gets the names
 DNS could not settle.
