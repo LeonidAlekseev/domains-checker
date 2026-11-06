@@ -55,6 +55,17 @@ Deno.test("parseWhois43: anything unrecognised is unknown, never free", () => {
   }
 });
 
+Deno.test("parseWhois43: a reply that is both taken and free is unknown", () => {
+  assertEquals(parseWhois43("Domain Name: x.io\nDomain not found.\n"), { kind: "unknown" });
+  assertEquals(parseWhois43("No match for x.com\nDomain Name: X.COM\n"), { kind: "unknown" });
+});
+
+Deno.test("parseWhois43: 'not found' about something else than the domain is not free", () => {
+  for (const t of ["Not found: invalid query\n", "Not found: nameserver\n", "% not found in the whole world\n"]) {
+    assertEquals(parseWhois43(t), { kind: "unknown" }, t);
+  }
+});
+
 Deno.test("parseServer: whois line from IANA", () => {
   assertEquals(parseServer("refer: x\nwhois:        whois.nic.io\nstatus: ACTIVE"), "whois.nic.io");
   assertEquals(parseServer("whois:\nstatus: ACTIVE"), undefined);
@@ -114,6 +125,15 @@ Deno.test("whois43Stage: zone without a whois server is UNKNOWN with one stderr 
   }
   assertEquals(notes.length, 2);
   assertEquals(notes[0].includes(".xx"), true);
+});
+
+Deno.test("whois43Stage: a failed IANA lookup is not cached, the next name retries it", async () => {
+  let iana = 0;
+  const query = (host: string, q: string) =>
+    host === "whois.iana.org"
+      ? ++iana === 1 ? Promise.reject(new Error("timeout")) : Promise.resolve(IANA(q))
+      : Promise.resolve(fixture("io.free"));
+  assertEquals(await whois43Stage(["a.io", "b.io"], 1, query), ["ERR a.io", "FREE b.io"]);
 });
 
 Deno.test("whois43Stage: punycode is what is sent", async () => {

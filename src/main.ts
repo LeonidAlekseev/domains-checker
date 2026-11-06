@@ -7,7 +7,7 @@
 
 import { parseArgs } from "@std/cli/parse-args";
 import denoJson from "../deno.json" with { type: "json" };
-import { check, parseNames, toDomains } from "./check.ts";
+import { check, maskProxy, parseNames, parseZones, sortLines, toDomains } from "./check.ts";
 import { defaultSets, names, parseList, warnTooMany } from "./gen.ts";
 import { isNice } from "./nice.ts";
 import { ttyPrompt } from "./prompt.ts";
@@ -28,8 +28,9 @@ Mask: C consonant, V vowel, D digit, L letter, A any of a-z 0-9 -; lowercase let
 Env:  CONS, VOWS (space-separated letters for C and V; default vowels a e i o u y), WHOIS_P (whois parallelism, default 2).
 Example: domains-checker gen CVCV | domains-checker check --tld ru,com > result.txt
 
-FREE means unregistered: premium or reserved names may still be unavailable. UNKNOWN: the zone has neither whois.ru
-nor RDAP (the IANA bootstrap), so it cannot be checked yet. Cyrillic names and zones are accepted.
+FREE means unregistered: premium or reserved names may still be unavailable. UNKNOWN: not checked, because the zone has
+no whois.ru, RDAP or port 43 whois server, the registry answer was not understood, or the name has more than one dot
+(only name.zone and name.<--tld zone> are checked). Cyrillic names and zones are accepted.
 
   --tld LIST      comma-separated zones for names without a dot (default ru)
   --proxy URL     proxy for whois.ru only (http, https, socks5, socks5h); repeatable, used one per captcha
@@ -81,20 +82,25 @@ async function main() {
   if (cmd === "check" && !rest.length && !args.nice) {
     const proxies = args.proxy as string[];
     for (const p of proxies) {
-      if (!/^(https?|socks5h?):\/\/./.test(p)) fail(`--proxy ${p}: use http://, https://, socks5:// or socks5h://`);
+      if (!/^(https?|socks5h?):\/\/./.test(p)) {
+        fail(`--proxy ${maskProxy(p)}: use http://, https://, socks5:// or socks5h://`);
+      }
     }
-    const zones = (args.tld ?? "ru").toLowerCase().split(",").map((z) => z.trim().replace(/^\./, ""));
-    for (const z of zones) {
-      if (!/^[\p{L}\p{N}-]+$/u.test(z)) fail(`--tld ${args.tld}: zones are comma-separated, like ru,com`);
-    }
+    const zones = parseZones(args.tld ?? "ru");
+    if (!zones) fail(`--tld ${args.tld}: zones are comma-separated, like ru,com or co.uk`);
     const whoisParallel = Number(Deno.env.get("WHOIS_P") || 2);
     if (!(whoisParallel >= 1)) fail("WHOIS_P must be a positive number");
     const input = await new Response(Deno.stdin.readable).text();
-    const domains = toDomains(parseNames(input), zones);
+    const { domains, unknown } = toDomains(parseNames(input), zones);
+    if (unknown.length) {
+      console.error(
+        `${unknown.length} name(s) with more than one dot are UNKNOWN (not checked), e.g. ${unknown[0]}; ` +
+          "only name.zone or name.<--tld zone> are checked",
+      );
+    }
     try {
-      for (const line of await check(domains, Math.floor(whoisParallel), { proxies, prompt: ttyPrompt })) {
-        console.log(line);
-      }
+      const lines = await check(domains, Math.floor(whoisParallel), { proxies, prompt: ttyPrompt });
+      for (const line of sortLines([...lines, ...unknown.map((d) => `UNKNOWN ${d}`)])) console.log(line);
     } catch (e) {
       fail((e as Error).message);
     }
