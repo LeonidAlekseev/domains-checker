@@ -1,0 +1,18 @@
+% TCI Whois Service. Terms of use:
+% https://tcinet.ru/documents/whois_ru_rf.pdf (in Russian)
+% https://tcinet.ru/documents/whois_su.pdf (in Russian)
+
+domain:        YANDEX.SU
+nserver:       ns1.snparking.ru.
+nserver:       ns2.snparking.ru.
+state:         REGISTERED, DELEGATED, VERIFIED
+org:           
+registrar:     DOMAINS-SU
+admin-contact: http://domains.ru/whois
+created:       2003-06-26T20:00:00Z
+paid-till:     2027-06-26T21:00:00Z
+free-date:     2027-07-30
+source:        TCI
+
+Last updated on 2026-11-06T09:53:01Z
+

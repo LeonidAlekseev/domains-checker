@@ -245,13 +245,20 @@ function rdapFake(answer: (url: string, n: number) => Response) {
   return { log, opts: { ...quiet, fetcher: () => f, resolve: notDelegated } };
 }
 
-Deno.test("check: RDAP 200 taken, 404 FREE, other ERR, no bootstrap zone UNKNOWN", async () => {
+Deno.test("check: RDAP 200 taken, 404 FREE, other ERR; a zone outside the bootstrap goes to port 43 whois", async () => {
   const { log, opts } = rdapFake((url) =>
     new Response(null, { status: url.endsWith("/a.com") ? 200 : url.endsWith("/b.com") ? 404 : 500 })
   );
-  const out = await check(["a.com", "b.com", "c.com", "d.io"], 1, opts);
-  assertEquals(out, ["ERR c.com", "FREE b.com", "UNKNOWN d.io", "taken-rdap a.com"]);
-  assertEquals(log.filter((u) => u.includes("rdap.example")).length, 3); // io: no request
+  const asked: string[] = [];
+  const query = (
+    host: string,
+    q: string,
+  ) => (asked.push(`${host}|${q}`),
+    Promise.resolve(host.endsWith("iana.org") ? "whois: whois.nic.io" : "No Data Found"));
+  const out = await check(["a.com", "b.com", "c.com", "d.io"], 1, { ...opts, query });
+  assertEquals(out, ["ERR c.com", "FREE b.com", "FREE d.io", "taken-rdap a.com"]);
+  assertEquals(asked, ["whois.iana.org|io", "whois.nic.io|d.io"]);
+  assertEquals(log.filter((u) => u.includes("rdap.example")).length, 3); // io: no RDAP request
   assertEquals(log.filter((u) => u.includes("iana.org")).length, 1); // bootstrap fetched once
 });
 
@@ -286,4 +293,12 @@ Deno.test("check: bootstrap unavailable is an error, not UNKNOWN", async () => {
 Deno.test("check: only .ru needs no bootstrap", async () => {
   const { fetcher } = fake(() => FREE);
   assertEquals(await check(["a.ru"], 1, { ...quiet, fetcher, resolve: notDelegated }), ["FREE a.ru"]);
+});
+
+Deno.test("check: .su and .рф go to whois.ru, not to port 43", async () => {
+  const { log, fetcher } = fake(() => FREE);
+  const query = () => Promise.reject(new Error("port 43 must not be used"));
+  const out = await check(["a.su", "щ.рф"], 1, { ...quiet, fetcher, resolve: notDelegated, query });
+  assertEquals(out, ["FREE a.su", "FREE щ.рф"]);
+  assertEquals(log.map((l) => l.split("/").pop()), ["a.su", "xn--y1a.xn--p1ai"]);
 });
