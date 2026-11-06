@@ -1,4 +1,6 @@
-/** Domain availability check: DNS NS via 1.1.1.1, then whois.ru (.ru) or RDAP (IANA bootstrap zones) for the rest. */
+import { parseServer, parseWhois43, type Query, whoisQuery } from "./whois43.ts";
+
+/** Domain availability check: DNS NS via 1.1.1.1, then whois.ru (.ru .su .рф), RDAP (IANA bootstrap) or port 43 whois. */
 
 export type Whois = { kind: "free" } | { kind: "taken"; state: string } | { kind: "captcha" } | { kind: "unknown" };
 
@@ -106,6 +108,8 @@ export type WhoisOpts = {
   /** Ask the user to pass the captcha at `link`. */
   prompt?: (link: string) => Promise<CaptchaChoice>;
   resolve?: Resolver;
+  /** Port 43 whois query, replaceable in tests. */
+  query?: Query;
   /** Wait between retries (also the default when a 429 has no Retry-After). */
   retryMs?: number;
 };
@@ -175,6 +179,9 @@ export async function whoisStage(domains: string[], parallel: number, o: WhoisOp
   return await pool(domains, parallel, one);
 }
 
+/** Zones whois.ru answers (.рф is a redirect to its Unicode URL, which fetch follows). */
+const WHOIS_RU = new Set(["ru", "su", "xn--p1ai"]);
+
 const BOOTSTRAP_URL = "https://data.iana.org/rdap/dns.json";
 
 async function loadBootstrap(doFetch: typeof fetch): Promise<Map<string, string>> {
@@ -191,8 +198,7 @@ async function loadBootstrap(doFetch: typeof fetch): Promise<Map<string, string>
 async function rdapStage(domains: string[], parallel: number, base: Map<string, string>, o: WhoisOpts) {
   const doFetch = (o.fetcher ?? defaultFetcher)();
   const one = async (domain: string): Promise<string> => {
-    const url = base.get(zoneOf(domain));
-    if (!url) return `UNKNOWN ${domain}`; // shortcut: zones without RDAP stay UNKNOWN until port 43 whois lands
+    const url = base.get(zoneOf(domain))!; // check() sends only bootstrap zones here
     for (let attempt = 0; attempt < 3; attempt++) {
       let wait = o.retryMs ?? 2000;
       try {
@@ -210,17 +216,46 @@ async function rdapStage(domains: string[], parallel: number, base: Map<string, 
   return await pool(domains, parallel, one);
 }
 
+/** Port 43 stage: server from whois.iana.org (once per zone), then the registry's own answer. */
+export async function whois43Stage(domains: string[], parallel: number, query: Query = whoisQuery): Promise<string[]> {
+  const servers = new Map<string, Promise<string | undefined>>();
+  const serverOf = (zone: string) => {
+    let s = servers.get(zone);
+    if (!s) {
+      s = query("whois.iana.org", zone).then(parseServer);
+      s.then((h) => h || console.error(`no whois server for .${zone}: its names stay UNKNOWN`), () => {});
+      servers.set(zone, s);
+    }
+    return s;
+  };
+  const one = async (domain: string): Promise<string> => {
+    try {
+      const host = await serverOf(zoneOf(domain));
+      if (!host) return `UNKNOWN ${domain}`;
+      const w = parseWhois43(await query(host, asciiDomain(domain)));
+      if (w.kind === "free") return `FREE ${domain}`;
+      if (w.kind === "taken") return `taken-whois ${domain}${w.state ? ` (${w.state})` : ""}`;
+      return `${w.kind === "unknown" ? "UNKNOWN" : "ERR"} ${domain}`;
+    } catch {
+      return `ERR ${domain}`;
+    }
+  };
+  return await pool(domains, parallel, one);
+}
+
 /** Check full domains; returns sorted result lines. Throws if a needed RDAP bootstrap cannot be loaded. */
 export async function check(domains: string[], parallel: number, o: WhoisOpts = {}): Promise<string[]> {
-  const needRdap = domains.some((d) => zoneOf(d) !== "ru");
+  const needRdap = domains.some((d) => !WHOIS_RU.has(zoneOf(d)));
   const base = needRdap ? await loadBootstrap((o.fetcher ?? defaultFetcher)()) : new Map<string, string>();
   const dns = await pool(domains, 40, async (d) => [d, await delegated(asciiDomain(d), o.resolve)] as const);
   const rest = dns.filter(([, d]) => !d).map(([n]) => n);
   const taken = dns.filter(([, d]) => d).map(([n]) => `taken-delegated ${n}`);
-  const ru = rest.filter((d) => zoneOf(d) === "ru");
+  const ru = rest.filter((d) => WHOIS_RU.has(zoneOf(d)));
+  const others = rest.filter((d) => !WHOIS_RU.has(zoneOf(d)));
   return sortLines([
     ...taken,
     ...await whoisStage(ru, parallel, o),
-    ...await rdapStage(rest.filter((d) => zoneOf(d) !== "ru"), parallel, base, o),
+    ...await rdapStage(others.filter((d) => base.has(zoneOf(d))), parallel, base, o),
+    ...await whois43Stage(others.filter((d) => !base.has(zoneOf(d))), parallel, o.query),
   ]);
 }

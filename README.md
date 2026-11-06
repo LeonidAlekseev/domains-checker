@@ -9,9 +9,9 @@
 [![Deno](https://img.shields.io/badge/deno-2.x-black?logo=deno)](https://deno.com)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
-A TypeScript/Deno command-line tool for bulk-checking which domains are free, in `.ru` and any other zone with RDAP. It
-generates names from a mask and checks them: first quickly over DNS, then the rest through whois.ru or RDAP. No `dig` or
-`curl` needed.
+A TypeScript/Deno command-line tool for bulk-checking which domains are free, in `.ru` and any other zone. It generates
+names from a mask and checks them: first quickly over DNS, then the rest through whois.ru, RDAP or the registry's own
+whois. No `dig` or `curl` needed.
 
 ## Table of Contents
 
@@ -30,8 +30,8 @@ generates names from a mask and checks them: first quickly over DNS, then the re
 - 🎭 **Masks**: `gen CVCV` prints every matching name, one per line.
 - 🔊 **`--nice`**: keeps only names that are easy to read and pronounce.
 - ⚡ **DNS first**: an NS query through `1.1.1.1` with 40 parallel requests settles most names.
-- 🔎 **whois / RDAP for the rest**: `whois.ru` for `.ru`, RDAP (IANA bootstrap) for other zones, to catch registered
-  domains with no NS answer.
+- 🔎 **whois / RDAP for the rest**: `whois.ru` for `.ru` `.su` `.рф`, RDAP (IANA bootstrap) for zones that have it, the
+  registry's port 43 whois for all others, to catch registered domains with no NS answer.
 - 🌍 **Any zone**: `--tld ru,com,app`; Cyrillic names and zones (`рф`) work.
 - 🔁 **Retries**: a whois request is retried up to 3 times; names that still fail are marked `ERR`.
 - 📦 **Single binary**: builds for Linux, macOS and Windows.
@@ -104,14 +104,14 @@ a name with a dot (`teef.io`) is checked as is. Requests use punycode, output ke
 
 ### Output format
 
-| Line                           | Meaning                                                  |
-| ------------------------------ | -------------------------------------------------------- |
-| `FREE name.tld`                | unregistered per the registry                            |
-| `taken-delegated name.tld`     | taken, NS records exist                                  |
-| `taken-whois name.tld (STATE)` | registered per whois.ru, `state:` shown                  |
-| `taken-rdap name.tld`          | registered per RDAP                                      |
-| `UNKNOWN name.tld`             | the zone has neither whois.ru nor RDAP, cannot check yet |
-| `ERR name.tld`                 | no answer — run again for this name                      |
+| Line                           | Meaning                                                      |
+| ------------------------------ | ------------------------------------------------------------ |
+| `FREE name.tld`                | unregistered per the registry                                |
+| `taken-delegated name.tld`     | taken, NS records exist                                      |
+| `taken-whois name.tld (STATE)` | registered per whois.ru or the registry's whois              |
+| `taken-rdap name.tld`          | registered per RDAP                                          |
+| `UNKNOWN name.tld`             | no registry source for the zone, or an answer not understood |
+| `ERR name.tld`                 | no answer — run again for this name                          |
 
 `FREE` means unregistered: premium or reserved names may still be unavailable. `FREE` is never printed without a
 registry answer. Lines are sorted. Free names only: `grep ^FREE result.txt`.
@@ -132,10 +132,17 @@ CONS="b d l m n r t v" VOWS="a o e i" domains-checker gen CVCVC | domains-checke
 
 1. **DNS**: an NS query for the domain through `1.1.1.1`, 40 at a time. An NS answer means the domain is taken
    (`taken-delegated`).
-2. **Registry**: everything else — no answer, NXDOMAIN, no NS records or a DNS error — goes to the registry. `.ru` uses
-   `whois.ru`: the page says either that the domain is free, or shows its `state:`. Zones in the IANA RDAP bootstrap
-   (`data.iana.org/rdap/dns.json`, fetched once per run) use RDAP: 200 is taken, 404 is free, 429 waits `Retry-After`
-   and retries. Other zones are `UNKNOWN`. If the bootstrap cannot be loaded, `check` exits with an error.
+2. **Registry**: everything else — no answer, NXDOMAIN, no NS records or a DNS error — goes to the registry. `.ru`,
+   `.su` and `.рф` use `whois.ru`: the page says either that the domain is free, or shows its `state:`. Zones in the
+   IANA RDAP bootstrap (`data.iana.org/rdap/dns.json`, fetched once per run) use RDAP: 200 is taken, 404 is free, 429
+   waits `Retry-After` and retries. If the bootstrap cannot be loaded, `check` exits with an error.
+3. **Registry whois (port 43)**: every other zone (`.io`, `.co`, `.me`, `.de`, ...). The server comes from
+   `whois.iana.org` (once per zone), the query has a 10 s timeout, parallelism is `WHOIS_P`. The answer text is matched
+   against one table of patterns (`PATTERNS` in `src/whois43.ts`): a "not found" pattern is `FREE`, a domain record is
+   `taken-whois name (STATE)`. A refused connection, timeout, rate-limit or refusal text is `ERR`.
+
+**`UNKNOWN`** means no source could say: the zone has no whois server in IANA (one note per zone on stderr), or the
+registry answered with text no pattern recognises. `FREE` is never printed without a positive "not found" answer.
 
 ## Troubleshooting
 
@@ -169,8 +176,8 @@ The mask allows only `C V D L A` and lowercase letters, digits and `-`.
 **Why is `y` a vowel?** In the default sets `V` is `a e i o u y` and `C` is the other 20 letters. Change them with
 `VOWS` and `CONS`.
 
-**Does it check other zones?** Yes: `--tld ru,com,app`. Zones without RDAP (for example `.io`, `.me`) are `UNKNOWN` for
-now.
+**Does it check other zones?** Yes: `--tld ru,com,app`. Zones without RDAP (for example `.io`, `.me`) go to the
+registry's port 43 whois; `UNKNOWN` stays only where it has no whois server or answers in an unknown format.
 
 **Why check DNS before whois?** It is fast and has no captcha. whois.ru is slower and limited, so it only gets the names
 DNS could not settle.
@@ -190,8 +197,9 @@ Layout:
 src/main.ts    CLI: arguments, help, gen and check commands
 src/gen.ts     mask expansion and .ru name rules
 src/nice.ts    the --nice heuristic
-src/check.ts   DNS, whois and RDAP checks, result parsing
-tests/         unit tests
+src/check.ts   DNS, whois.ru and RDAP checks, result parsing
+src/whois43.ts port 43 whois: query and the pattern table
+tests/         unit tests, real registry answers in tests/fixtures/whois43
 ```
 
 Release: bump `version` in `deno.json`, then `git tag v<version> && git push origin v<version>`. CI builds binaries for
