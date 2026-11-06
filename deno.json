@@ -8,10 +8,10 @@
     "@std/cli": "jsr:@std/cli@^1"
   },
   "tasks": {
-    "start": "deno run --allow-net --allow-env=CONS,VOWS,WHOIS_P --allow-read=/dev/tty,CONIN$ src/main.ts",
-    "test": "deno test --allow-read=tests --allow-run=deno",
+    "start": "deno run --allow-net --allow-env=CONS,VOWS,WHOIS_P --allow-read=/dev/tty,CONIN$ --allow-write src/main.ts",
+    "test": "deno test --allow-read --allow-write --allow-run=deno",
     "check": "deno fmt --check && deno lint && deno check src/main.ts tests/",
-    "compile": "deno compile --allow-net --allow-env=CONS,VOWS,WHOIS_P --allow-read=/dev/tty,CONIN$ -o dist/domains-checker src/main.ts"
+    "compile": "deno compile --allow-net --allow-env=CONS,VOWS,WHOIS_P --allow-read=/dev/tty,CONIN$ --allow-write -o dist/domains-checker src/main.ts"
   },
   "fmt": {
     "lineWidth": 120

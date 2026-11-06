@@ -141,13 +141,21 @@ export type WhoisOpts = {
   fetcher?: (proxy?: string) => typeof fetch;
   /** Proxies to rotate through, one per captcha, before asking the user. */
   proxies?: string[];
-  /** Ask the user to pass the captcha at `link`. */
-  prompt?: (link: string) => Promise<CaptchaChoice>;
+  /** Ask the user to pass the captcha at `link`, speaking through `say`. */
+  prompt?: (link: string, say: (message: string) => void) => Promise<CaptchaChoice>;
   resolve?: Resolver;
   /** Port 43 whois query, replaceable in tests. */
   query?: Query;
   /** Wait between retries (also the default when a 429 has no Retry-After). */
   retryMs?: number;
+  /** Abort: nothing new starts, requests in flight are abandoned, their names are left out of the result. */
+  signal?: AbortSignal;
+  /** Captcha, proxy and registry notes; console.error by default. */
+  warn?: (message: string) => void;
+  /** A stage with work to do starts. */
+  onStage?: (name: string, total: number) => void;
+  /** One item of the stage is done; no line for a name that goes on to the next stage. */
+  onResult?: (line?: string) => void;
 };
 
 const defaultFetcher = (proxy?: string): typeof fetch => {
@@ -155,6 +163,37 @@ const defaultFetcher = (proxy?: string): typeof fetch => {
   const client = Deno.createHttpClient({ proxy: { url: proxy } }); // one client per proxy, so connections are reused
   return (url, init) => fetch(url, { ...init, client });
 };
+
+/** `work`, or undefined the moment `signal` aborts; whatever `work` was doing is abandoned. */
+function untilAbort<T>(work: Promise<T>, signal?: AbortSignal): Promise<T | undefined> {
+  if (!signal) return work;
+  return new Promise((resolve, reject) => {
+    const stop = () => resolve(undefined);
+    if (signal.aborted) stop();
+    signal.addEventListener("abort", stop, { once: true });
+    work.then(resolve, reject).finally(() => signal.removeEventListener("abort", stop));
+  });
+}
+
+/** Run one stage over `items`, reporting each result as it lands; on abort the unfinished items are left out. */
+async function stage(
+  name: string,
+  items: string[],
+  parallel: number,
+  one: (item: string) => Promise<string | undefined>,
+  o: WhoisOpts,
+): Promise<string[]> {
+  if (!items.length || o.signal?.aborted) return [];
+  o.onStage?.(name, items.length);
+  const lines = await pool(items, parallel, async (item) => {
+    if (o.signal?.aborted) return undefined;
+    const line = await untilAbort(one(item), o.signal);
+    if (o.signal?.aborted) return undefined;
+    o.onResult?.(line);
+    return line;
+  });
+  return lines.filter((line) => line !== undefined);
+}
 
 /**
  * whois.ru stage. On the first captcha no new request starts (requests already in flight may finish)
@@ -164,28 +203,30 @@ export async function whoisStage(domains: string[], parallel: number, o: WhoisOp
   const fetcher = o.fetcher ?? defaultFetcher;
   const proxies = [...o.proxies ?? []];
   const prompt = o.prompt ?? (() => Promise.resolve<CaptchaChoice>("no-terminal"));
+  const warn = o.warn ?? console.error;
   let doFetch = fetcher();
   let epoch = 0; // bumped after each resolved captcha; a captcha from an older epoch is already handled
   let stopped = false;
   let resolving: Promise<void> | undefined;
+  o.signal?.addEventListener("abort", () => stopped = true);
 
   const resolveCaptcha = (domain: string, seen: number) => {
     if (stopped || seen !== epoch) return resolving;
     resolving ??= (async () => {
       const proxy = proxies.shift();
       if (proxy) {
-        console.error(`captcha: whois.ru blocked, switching to proxy ${maskProxy(proxy)}`);
+        warn(`captcha: whois.ru blocked, switching to proxy ${maskProxy(proxy)}`);
         doFetch = fetcher(proxy);
       } else {
         let choice: CaptchaChoice;
         try {
-          choice = await prompt(`https://whois.ru/${asciiDomain(domain)}`);
+          choice = await prompt(`https://whois.ru/${asciiDomain(domain)}`, warn);
         } catch {
           choice = "stop"; // a broken prompt must not loop
         }
         if (choice !== "continue") {
           stopped = true;
-          console.error(
+          warn(
             choice === "stop"
               ? "captcha: whois.ru blocked, stopped by user; unchecked names are ERR"
               : "captcha: whois.ru blocked and no terminal to ask, stop and retry later",
@@ -217,7 +258,7 @@ export async function whoisStage(domains: string[], parallel: number, o: WhoisOp
     }
     return `ERR ${domain}`;
   };
-  return await pool(domains, parallel, one);
+  return await stage("whois.ru", domains, parallel, one, o);
 }
 
 /** Zones whois.ru answers (.рф is a redirect to its Unicode URL, which fetch follows). */
@@ -240,7 +281,7 @@ async function rdapStage(domains: string[], parallel: number, base: Map<string, 
   const doFetch = (o.fetcher ?? defaultFetcher)();
   const one = async (domain: string): Promise<string> => {
     const url = base.get(zoneOf(domain))!; // check() sends only bootstrap zones here
-    for (let attempt = 0; attempt < 3; attempt++) {
+    for (let attempt = 0; attempt < 3 && !o.signal?.aborted; attempt++) {
       let wait = o.retryMs ?? 2000;
       try {
         const res = await doFetch(`${url}domain/${asciiDomain(domain)}`, { signal: AbortSignal.timeout(20_000) });
@@ -254,18 +295,24 @@ async function rdapStage(domains: string[], parallel: number, base: Map<string, 
     }
     return `ERR ${domain}`;
   };
-  return await pool(domains, parallel, one);
+  return await stage("RDAP", domains, parallel, one, o);
 }
 
 /** Port 43 stage: server from whois.iana.org (once per zone), then the registry's own answer. */
-export async function whois43Stage(domains: string[], parallel: number, query: Query = whoisQuery): Promise<string[]> {
+export async function whois43Stage(
+  domains: string[],
+  parallel: number,
+  query: Query = whoisQuery,
+  o: WhoisOpts = {},
+): Promise<string[]> {
+  const warn = o.warn ?? console.error;
   const servers = new Map<string, Promise<string | undefined>>();
   const serverOf = (zone: string) => {
     let s = servers.get(zone);
     if (!s) {
       s = query("whois.iana.org", zone).then(parseServer);
       s.then(
-        (h) => h || console.error(`no whois server for .${zone}: its names stay UNKNOWN`),
+        (h) => h || warn(`no whois server for .${zone}: its names stay UNKNOWN`),
         () => servers.delete(zone),
       );
       servers.set(zone, s);
@@ -284,22 +331,30 @@ export async function whois43Stage(domains: string[], parallel: number, query: Q
       return `ERR ${domain}`;
     }
   };
-  return await pool(domains, parallel, one);
+  return await stage("port 43", domains, parallel, one, o);
 }
 
-/** Check full domains; returns sorted result lines. Throws if a needed RDAP bootstrap cannot be loaded. */
+/**
+ * Check full domains; returns sorted result lines, on abort only the finished ones.
+ * Throws if a needed RDAP bootstrap cannot be loaded.
+ */
 export async function check(domains: string[], parallel: number, o: WhoisOpts = {}): Promise<string[]> {
   const needRdap = domains.some((d) => !WHOIS_RU.has(zoneOf(d)));
-  const base = needRdap ? await loadBootstrap((o.fetcher ?? defaultFetcher)()) : new Map<string, string>();
-  const dns = await pool(domains, 40, async (d) => [d, await delegated(asciiDomain(d), o.resolve)] as const);
-  const rest = dns.filter(([, d]) => !d).map(([n]) => n);
-  const taken = dns.filter(([, d]) => d).map(([n]) => `taken-delegated ${n}`);
+  const base = needRdap
+    ? await untilAbort(loadBootstrap((o.fetcher ?? defaultFetcher)()), o.signal)
+    : new Map<string, string>();
+  if (!base) return [];
+  const rest: string[] = [];
+  const taken = await stage("DNS", domains, 40, async (d) => {
+    if (await delegated(asciiDomain(d), o.resolve)) return `taken-delegated ${d}`;
+    rest.push(d);
+  }, o);
   const ru = rest.filter((d) => WHOIS_RU.has(zoneOf(d)));
   const others = rest.filter((d) => !WHOIS_RU.has(zoneOf(d)));
   return sortLines([
     ...taken,
     ...await whoisStage(ru, parallel, o),
     ...await rdapStage(others.filter((d) => base.has(zoneOf(d))), parallel, base, o),
-    ...await whois43Stage(others.filter((d) => !base.has(zoneOf(d))), parallel, o.query),
+    ...await whois43Stage(others.filter((d) => !base.has(zoneOf(d))), parallel, o.query, o),
   ]);
 }

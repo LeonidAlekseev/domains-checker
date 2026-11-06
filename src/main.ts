@@ -1,4 +1,4 @@
-#!/usr/bin/env -S deno run --allow-net --allow-env=CONS,VOWS,WHOIS_P --allow-read=/dev/tty,CONIN$
+#!/usr/bin/env -S deno run --allow-net --allow-env=CONS,VOWS,WHOIS_P --allow-read=/dev/tty,CONIN$ --allow-write
 /**
  * domains-checker — mass check of free domains in any zone.
  *
@@ -7,10 +7,12 @@
 
 import { parseArgs } from "@std/cli/parse-args";
 import denoJson from "../deno.json" with { type: "json" };
-import { check, maskProxy, parseNames, parseZones, sortLines, toDomains } from "./check.ts";
+import { maskProxy, parseNames, parseZones, toDomains } from "./check.ts";
 import { defaultSets, names, parseList, warnTooMany } from "./gen.ts";
 import { isNice } from "./nice.ts";
 import { ttyPrompt } from "./prompt.ts";
+import { defaultOut, run } from "./run.ts";
+import { createUi, realTerm } from "./ui.ts";
 
 const HELP = `domains-checker ${denoJson.version} — mass check of free domains in any zone.
 
@@ -18,11 +20,12 @@ Usage:
   domains-checker gen MASK [--nice]
                                print every name matching the mask, one per line;
                                --nice keeps only pronounceable names
-  domains-checker check [--tld ru,com,...] [--proxy URL]...
+  domains-checker check [--tld ru,com,...] [--proxy URL]... [--out FILE]
                                read names from stdin (a name without a dot is checked in every --tld zone,
                                default ru; a name with a dot as is), print one line per domain:
                                FREE / taken-delegated / taken-whois / taken-rdap / UNKNOWN / ERR;
-                               on a whois.ru captcha: next --proxy, else ask on the terminal, else stop
+                               on a whois.ru captcha: next --proxy, else ask on the terminal, else stop;
+                               every FREE is appended to a file as soon as it is found (domain only)
 
 Mask: C consonant, V vowel, D digit, L letter, A any of a-z 0-9 -; lowercase letters, digits and - are literals.
 Env:  CONS, VOWS (space-separated letters for C and V; default vowels a e i o u y), WHOIS_P (whois parallelism, default 2).
@@ -32,8 +35,13 @@ FREE means unregistered: premium or reserved names may still be unavailable. UNK
 no whois.ru, RDAP or port 43 whois server, the registry answer was not understood, or the name has more than one dot
 (only name.zone and name.<--tld zone> are checked). Cyrillic names and zones are accepted.
 
+On a terminal, stderr shows live progress per stage and stdout does not repeat FREE lines; NO_COLOR turns colours off.
+Ctrl+C stops at once: no new requests, later stages skipped, finished results printed, the summary says how many were
+not checked, exit code 130. A second Ctrl+C exits immediately. FREE already written stays in the file.
+
   --tld LIST      comma-separated zones for names without a dot (default ru)
   --proxy URL     proxy for whois.ru only (http, https, socks5, socks5h); repeatable, used one per captcha
+  --out FILE      file for FREE domains, appended to, created on the first FREE (default free-YYYYMMDD-HHMMSS.txt)
   -V, --version   print version
   -h, --help      show this help`;
 
@@ -51,7 +59,7 @@ async function gen(mask: string | undefined, nice: boolean) {
   };
   try {
     const warning = warnTooMany(mask, sets);
-    if (warning) console.error(warning);
+    if (warning) createUi(realTerm()).warn(warning);
     // Deno.stdout.write may write partially; the stream writer writes everything.
     const out = Deno.stdout.writable.getWriter();
     const enc = new TextEncoder();
@@ -69,11 +77,28 @@ async function gen(mask: string | undefined, nice: boolean) {
   }
 }
 
+async function print(lines: string[]) {
+  try {
+    const out = Deno.stdout.writable.getWriter();
+    await out.write(new TextEncoder().encode(lines.map((line) => `${line}\n`).join("")));
+    out.releaseLock();
+  } catch (e) {
+    if (!(e instanceof Deno.errors.BrokenPipe)) throw e; // the reader left (e.g. `| head`): nothing to deliver
+  }
+}
+
+/** First signal aborts the run, the second exits at once. SIGTERM cannot be registered on Windows. */
+function stopOnSignal(ctrl: AbortController) {
+  const onSignal = () => ctrl.signal.aborted ? Deno.exit(130) : ctrl.abort();
+  Deno.addSignalListener("SIGINT", onSignal);
+  if (Deno.build.os !== "windows") Deno.addSignalListener("SIGTERM", onSignal);
+}
+
 async function main() {
   const args = parseArgs(Deno.args, {
     boolean: ["help", "version", "nice"],
     collect: ["proxy"],
-    string: ["proxy", "tld"],
+    string: ["proxy", "tld", "out"],
     alias: { h: "help", V: "version" },
     unknown: (arg) => !arg.startsWith("-") || fail(`Unknown option ${arg}, see --help`),
   });
@@ -93,20 +118,20 @@ async function main() {
     const whoisParallel = Number(Deno.env.get("WHOIS_P") || 2);
     if (!(whoisParallel >= 1)) fail("WHOIS_P must be a positive number");
     const input = await new Response(Deno.stdin.readable).text();
-    const { domains, unknown } = toDomains(parseNames(input), zones);
-    if (unknown.length) {
-      console.error(
-        `${unknown.length} name(s) with more than one dot are UNKNOWN (not checked), e.g. ${unknown[0]}; ` +
-          "only name.zone or name.<--tld zone> are checked",
-      );
-    }
-    try {
-      const lines = await check(domains, Math.floor(whoisParallel), { proxies, prompt: ttyPrompt });
-      for (const line of sortLines([...lines, ...unknown.map((d) => `UNKNOWN ${d}`)])) console.log(line);
-    } catch (e) {
-      fail((e as Error).message);
-    }
-    return;
+    const names = parseNames(input);
+    const ctrl = new AbortController();
+    stopOnSignal(ctrl);
+    Deno.exit(
+      await run({ names: names.length, ...toDomains(names, zones) }, Math.floor(whoisParallel), {
+        proxies,
+        prompt: ttyPrompt,
+        signal: ctrl.signal,
+        out: args.out || defaultOut(),
+        term: realTerm(),
+        print,
+        stdoutTty: Deno.stdout.isTerminal(),
+      }),
+    );
   }
   fail(HELP);
 }
