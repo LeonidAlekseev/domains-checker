@@ -1,31 +1,37 @@
-#!/usr/bin/env -S deno run --allow-net=1.1.1.1,whois.ru --allow-env=CONS,VOWS,WHOIS_P --allow-read=/dev/tty,CONIN$
+#!/usr/bin/env -S deno run --allow-net --allow-env=CONS,VOWS,WHOIS_P --allow-read=/dev/tty,CONIN$
 /**
- * domains-checker — mass check of free .ru domains.
+ * domains-checker — mass check of free domains in any zone.
  *
  *   domains-checker gen CVCV | domains-checker check > result.txt
  */
 
 import { parseArgs } from "@std/cli/parse-args";
 import denoJson from "../deno.json" with { type: "json" };
-import { check, parseNames } from "./check.ts";
+import { check, parseNames, toDomains } from "./check.ts";
 import { defaultSets, names, parseList, warnTooMany } from "./gen.ts";
 import { isNice } from "./nice.ts";
 import { ttyPrompt } from "./prompt.ts";
 
-const HELP = `domains-checker ${denoJson.version} — mass check of free .ru domains.
+const HELP = `domains-checker ${denoJson.version} — mass check of free domains in any zone.
 
 Usage:
   domains-checker gen MASK [--nice]
                                print every name matching the mask, one per line;
                                --nice keeps only pronounceable names
-  domains-checker check [--proxy URL]...
-                               read names from stdin, print FREE / taken-delegated / taken-whois / ERR;
+  domains-checker check [--tld ru,com,...] [--proxy URL]...
+                               read names from stdin (a name without a dot is checked in every --tld zone,
+                               default ru; a name with a dot as is), print one line per domain:
+                               FREE / taken-delegated / taken-whois / taken-rdap / UNKNOWN / ERR;
                                on a whois.ru captcha: next --proxy, else ask on the terminal, else stop
 
 Mask: C consonant, V vowel, D digit, L letter, A any of a-z 0-9 -; lowercase letters, digits and - are literals.
 Env:  CONS, VOWS (space-separated letters for C and V; default vowels a e i o u y), WHOIS_P (whois parallelism, default 2).
-Example: domains-checker gen CVCV | domains-checker check > result.txt
+Example: domains-checker gen CVCV | domains-checker check --tld ru,com > result.txt
 
+FREE means unregistered: premium or reserved names may still be unavailable. UNKNOWN: the zone has neither whois.ru
+nor RDAP (the IANA bootstrap), so it cannot be checked yet. Cyrillic names and zones are accepted.
+
+  --tld LIST      comma-separated zones for names without a dot (default ru)
   --proxy URL     proxy for whois.ru only (http, https, socks5, socks5h); repeatable, used one per captcha
   -V, --version   print version
   -h, --help      show this help`;
@@ -64,7 +70,7 @@ async function main() {
   const args = parseArgs(Deno.args, {
     boolean: ["help", "version", "nice"],
     collect: ["proxy"],
-    string: ["proxy"],
+    string: ["proxy", "tld"],
     alias: { h: "help", V: "version" },
     unknown: (arg) => !arg.startsWith("-") || fail(`Unknown option ${arg}, see --help`),
   });
@@ -77,11 +83,20 @@ async function main() {
     for (const p of proxies) {
       if (!/^(https?|socks5h?):\/\/./.test(p)) fail(`--proxy ${p}: use http://, https://, socks5:// or socks5h://`);
     }
+    const zones = (args.tld ?? "ru").toLowerCase().split(",").map((z) => z.trim().replace(/^\./, ""));
+    for (const z of zones) {
+      if (!/^[\p{L}\p{N}-]+$/u.test(z)) fail(`--tld ${args.tld}: zones are comma-separated, like ru,com`);
+    }
     const whoisParallel = Number(Deno.env.get("WHOIS_P") || 2);
     if (!(whoisParallel >= 1)) fail("WHOIS_P must be a positive number");
     const input = await new Response(Deno.stdin.readable).text();
-    for (const line of await check(parseNames(input), Math.floor(whoisParallel), { proxies, prompt: ttyPrompt })) {
-      console.log(line);
+    const domains = toDomains(parseNames(input), zones);
+    try {
+      for (const line of await check(domains, Math.floor(whoisParallel), { proxies, prompt: ttyPrompt })) {
+        console.log(line);
+      }
+    } catch (e) {
+      fail((e as Error).message);
     }
     return;
   }
