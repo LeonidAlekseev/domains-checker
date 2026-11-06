@@ -63,6 +63,8 @@ async function gen(mask: string | undefined, nice: boolean) {
     await out.write(enc.encode(buf.join("")));
     out.releaseLock();
   } catch (e) {
+    // The reader closed stdout (e.g. `| head`): nothing left to deliver, so exit quietly.
+    if (e instanceof Deno.errors.BrokenPipe) return;
     fail((e as Error).message);
   }
 }

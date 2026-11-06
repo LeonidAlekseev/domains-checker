@@ -9,7 +9,7 @@
   },
   "tasks": {
     "start": "deno run --allow-net --allow-env=CONS,VOWS,WHOIS_P --allow-read=/dev/tty,CONIN$ src/main.ts",
-    "test": "deno test --allow-read=tests",
+    "test": "deno test --allow-read=tests --allow-run=deno",
     "check": "deno fmt --check && deno lint && deno check src/main.ts tests/",
     "compile": "deno compile --allow-net --allow-env=CONS,VOWS,WHOIS_P --allow-read=/dev/tty,CONIN$ -o dist/domains-checker src/main.ts"
   },
