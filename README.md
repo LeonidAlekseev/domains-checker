@@ -9,8 +9,9 @@
 [![Deno](https://img.shields.io/badge/deno-2.x-black?logo=deno)](https://deno.com)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
-A TypeScript/Deno command-line tool for bulk-checking which `.ru` domains are free. It generates names from a mask and
-checks them: first quickly over DNS, then the rest through whois. No `dig` or `curl` needed.
+A TypeScript/Deno command-line tool for bulk-checking which domains are free, in `.ru` and any other zone with RDAP. It
+generates names from a mask and checks them: first quickly over DNS, then the rest through whois.ru or RDAP. No `dig` or
+`curl` needed.
 
 ## Table of Contents
 
@@ -29,7 +30,9 @@ checks them: first quickly over DNS, then the rest through whois. No `dig` or `c
 - 🎭 **Masks**: `gen CVCV` prints every matching name, one per line.
 - 🔊 **`--nice`**: keeps only names that are easy to read and pronounce.
 - ⚡ **DNS first**: an NS query through `1.1.1.1` with 40 parallel requests settles most names.
-- 🔎 **whois for the rest**: `whois.ru` catches registered domains that have no NS answer.
+- 🔎 **whois / RDAP for the rest**: `whois.ru` for `.ru`, RDAP (IANA bootstrap) for other zones, to catch registered
+  domains with no NS answer.
+- 🌍 **Any zone**: `--tld ru,com,app`; Cyrillic names and zones (`рф`) work.
 - 🔁 **Retries**: a whois request is retried up to 3 times; names that still fail are marked `ERR`.
 - 📦 **Single binary**: builds for Linux, macOS and Windows.
 
@@ -41,7 +44,7 @@ checks them: first quickly over DNS, then the rest through whois. No `dig` or `c
 #   put it on your PATH as domains-checker
 
 # Option 2: from JSR (needs Deno 2+)
-deno install -g -n domains-checker --allow-net=1.1.1.1,whois.ru --allow-env=CONS,VOWS,WHOIS_P --allow-read=/dev/tty,CONIN$ \
+deno install -g -n domains-checker --allow-net --allow-env=CONS,VOWS,WHOIS_P --allow-read=/dev/tty,CONIN$ \
   jsr:@leonidalekseev/domains-checker
 
 # Option 3: from source (needs Deno 2+)
@@ -68,7 +71,7 @@ grep ^FREE result.txt
 
 ```sh
 domains-checker gen MASK [--nice]   # print names matching the mask
-domains-checker check               # read names from stdin, print one result line per name
+domains-checker check [--tld ru,com]  # read names from stdin, print one result line per domain
 domains-checker --help              # also: --version
 ```
 
@@ -95,19 +98,23 @@ consonants or two vowels in a row, and only common consonant clusters such as `s
 
 ### Input of `check`
 
-Names go to stdin without `.ru`, separated by spaces, commas or newlines. Only `a-z`, `0-9` and `-` are accepted; case
-is ignored, duplicates are dropped.
+Names go to stdin, separated by spaces, commas or newlines. Letters (Cyrillic too), digits and `-` are accepted; case is
+ignored, duplicates are dropped. A name without a dot is checked in every `--tld` zone (comma-separated, default `ru`);
+a name with a dot (`teef.io`) is checked as is. Requests use punycode, output keeps what you typed.
 
 ### Output format
 
-| Line                       | Meaning                                        |
-| -------------------------- | ---------------------------------------------- |
-| `FREE name`                | the domain is free                             |
-| `taken-delegated name`     | taken, NS records exist                        |
-| `taken-whois name (STATE)` | registered per whois, `state:` shown           |
-| `ERR name`                 | whois did not answer — run again for this name |
+| Line                           | Meaning                                                  |
+| ------------------------------ | -------------------------------------------------------- |
+| `FREE name.tld`                | unregistered per the registry                            |
+| `taken-delegated name.tld`     | taken, NS records exist                                  |
+| `taken-whois name.tld (STATE)` | registered per whois.ru, `state:` shown                  |
+| `taken-rdap name.tld`          | registered per RDAP                                      |
+| `UNKNOWN name.tld`             | the zone has neither whois.ru nor RDAP, cannot check yet |
+| `ERR name.tld`                 | no answer — run again for this name                      |
 
-Lines are sorted. Free names only: `grep ^FREE result.txt`.
+`FREE` means unregistered: premium or reserved names may still be unavailable. `FREE` is never printed without a
+registry answer. Lines are sorted. Free names only: `grep ^FREE result.txt`.
 
 ### Environment variables
 
@@ -123,10 +130,12 @@ CONS="b d l m n r t v" VOWS="a o e i" domains-checker gen CVCVC | domains-checke
 
 ## How It Works
 
-1. **DNS**: an NS query for `name.ru` through `1.1.1.1`, 40 at a time. An NS answer means the domain is taken
+1. **DNS**: an NS query for the domain through `1.1.1.1`, 40 at a time. An NS answer means the domain is taken
    (`taken-delegated`).
-2. **whois**: everything else — no answer, NXDOMAIN, no NS records or a DNS error — is checked through `whois.ru`. The
-   page says either that the domain is free, or shows its `state:`.
+2. **Registry**: everything else — no answer, NXDOMAIN, no NS records or a DNS error — goes to the registry. `.ru` uses
+   `whois.ru`: the page says either that the domain is free, or shows its `state:`. Zones in the IANA RDAP bootstrap
+   (`data.iana.org/rdap/dns.json`, fetched once per run) use RDAP: 200 is taken, 404 is free, 429 waits `Retry-After`
+   and retries. Other zones are `UNKNOWN`. If the bootstrap cannot be loaded, `check` exits with an error.
 
 ## Troubleshooting
 
@@ -136,7 +145,7 @@ whois.ru asked for a captcha. From then on no new whois.ru request starts; resul
 
 1. If another `--proxy URL` is left, `check` switches to it and continues. `--proxy` is repeatable, applies to whois.ru
    only (DNS is not proxied) and is used one per captcha; the first requests go direct. Schemes: `http://`, `https://`,
-   `socks5://`, `socks5h://` (`socks4://` is rejected by Deno). Add the proxy host to `--allow-net`.
+   `socks5://`, `socks5h://` (`socks4://` is rejected by Deno).
 2. Otherwise, with a terminal, it prints `https://whois.ru/<name>.ru` to stderr. Pass the captcha in a browser, then
    press Enter to continue or `q` + Enter to stop. The prompt reads the controlling terminal (`/dev/tty`, `CONIN$` on
    Windows), so it works in `gen | check`. If the captcha comes back, it asks again.
@@ -160,7 +169,8 @@ The mask allows only `C V D L A` and lowercase letters, digits and `-`.
 **Why is `y` a vowel?** In the default sets `V` is `a e i o u y` and `C` is the other 20 letters. Change them with
 `VOWS` and `CONS`.
 
-**Does it check other zones?** No, only `.ru`.
+**Does it check other zones?** Yes: `--tld ru,com,app`. Zones without RDAP (for example `.io`, `.me`) are `UNKNOWN` for
+now.
 
 **Why check DNS before whois?** It is fast and has no captcha. whois.ru is slower and limited, so it only gets the names
 DNS could not settle.
@@ -180,7 +190,7 @@ Layout:
 src/main.ts    CLI: arguments, help, gen and check commands
 src/gen.ts     mask expansion and .ru name rules
 src/nice.ts    the --nice heuristic
-src/check.ts   DNS and whois checks, result parsing
+src/check.ts   DNS, whois and RDAP checks, result parsing
 tests/         unit tests
 ```
 

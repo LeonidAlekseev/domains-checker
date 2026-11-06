@@ -1,11 +1,47 @@
-/** .ru availability check: DNS NS via 1.1.1.1, then whois.ru for the rest. */
+/** Domain availability check: DNS NS via 1.1.1.1, then whois.ru (.ru) or RDAP (IANA bootstrap zones) for the rest. */
 
 export type Whois = { kind: "free" } | { kind: "taken"; state: string } | { kind: "captcha" } | { kind: "unknown" };
 
-/** Split on space/comma/newline, lowercase, keep [a-z0-9-]+, dedupe (first-seen order). */
+/** Split on space/comma/newline, lowercase, keep dotted or dotless labels of letters/digits/`-` (IDN ok), dedupe. */
 export function parseNames(input: string): string[] {
-  const all = input.toLowerCase().split(/[\s,]+/).filter((n) => /^[a-z0-9-]+$/.test(n));
+  const all = input.toLowerCase().split(/[\s,]+/).filter((n) => /^[\p{L}\p{N}-]+(\.[\p{L}\p{N}-]+)*$/u.test(n));
   return [...new Set(all)];
+}
+
+/** Punycode form of a domain, used for every request; "" if it is not a valid host. */
+export function asciiDomain(domain: string): string {
+  try {
+    return new URL(`http://${domain}`).hostname;
+  } catch {
+    return "";
+  }
+}
+
+export const zoneOf = (domain: string) => asciiDomain(domain).split(".").pop()!;
+
+/** A name without a dot is checked in every zone, a name with a dot as is; invalid hosts are dropped. */
+export function toDomains(names: string[], zones: string[]): string[] {
+  const all = names.flatMap((n) => n.includes(".") ? [n] : zones.map((z) => `${n}.${z}`));
+  return [...new Set(all)].filter((d) => asciiDomain(d));
+}
+
+/** IANA RDAP bootstrap (dns.json) to a tld -> base URL map (trailing slash ensured). */
+export function parseBootstrap(json: unknown): Map<string, string> {
+  const map = new Map<string, string>();
+  for (const [tlds, urls] of (json as { services: [string[], string[]][] }).services) {
+    const base = urls[0].endsWith("/") ? urls[0] : urls[0] + "/";
+    for (const t of tlds) map.set(t, base);
+  }
+  return map;
+}
+
+/** Retry-After header (seconds or HTTP date) in ms; undefined if absent or unparsable. */
+export function retryAfterMs(header: string | null, now = Date.now()): number | undefined {
+  if (header === null) return undefined;
+  const secs = Number(header);
+  if (header.trim() !== "" && secs >= 0) return secs * 1000;
+  const at = Date.parse(header);
+  return isNaN(at) ? undefined : Math.max(0, at - now);
 }
 
 /** Parse a whois.ru page: tags stripped, then free / first `state:` / captcha, in that order. */
@@ -48,10 +84,10 @@ const resolveNs: Resolver = (domain, signal) =>
  * Deno.resolveDns throws NotFound for both NXDOMAIN and NODATA (verified against 1.1.1.1), so only a
  * successful NS answer counts as delegated; everything else goes on to whois, which is authoritative.
  */
-export async function delegated(name: string, resolve: Resolver = resolveNs): Promise<boolean> {
+export async function delegated(domain: string, resolve: Resolver = resolveNs): Promise<boolean> {
   for (let attempt = 0; attempt < DNS_ATTEMPTS; attempt++) {
     try {
-      await resolve(`${name}.ru`, AbortSignal.timeout(DNS_TIMEOUT_MS));
+      await resolve(domain, AbortSignal.timeout(DNS_TIMEOUT_MS));
       return true;
     } catch (e) {
       if (e instanceof Deno.errors.NotFound) return false; // definitive answer, retrying won't help
@@ -70,6 +106,7 @@ export type WhoisOpts = {
   /** Ask the user to pass the captcha at `link`. */
   prompt?: (link: string) => Promise<CaptchaChoice>;
   resolve?: Resolver;
+  /** Wait between retries (also the default when a 429 has no Retry-After). */
   retryMs?: number;
 };
 
@@ -83,7 +120,7 @@ const defaultFetcher = (proxy?: string): typeof fetch => {
  * whois.ru stage. On the first captcha no new request starts (requests already in flight may finish)
  * until a proxy is swapped in or the user continues; on stop the unchecked names become ERR.
  */
-export async function whoisStage(names: string[], parallel: number, o: WhoisOpts = {}): Promise<string[]> {
+export async function whoisStage(domains: string[], parallel: number, o: WhoisOpts = {}): Promise<string[]> {
   const fetcher = o.fetcher ?? defaultFetcher;
   const proxies = [...o.proxies ?? []];
   const prompt = o.prompt ?? (() => Promise.resolve<CaptchaChoice>("no-terminal"));
@@ -92,7 +129,7 @@ export async function whoisStage(names: string[], parallel: number, o: WhoisOpts
   let stopped = false;
   let resolving: Promise<void> | undefined;
 
-  const resolveCaptcha = (name: string, seen: number) => {
+  const resolveCaptcha = (domain: string, seen: number) => {
     if (stopped || seen !== epoch) return resolving;
     resolving ??= (async () => {
       const proxy = proxies.shift();
@@ -100,7 +137,7 @@ export async function whoisStage(names: string[], parallel: number, o: WhoisOpts
         console.error(`captcha: whois.ru blocked, switching to proxy ${proxy}`);
         doFetch = fetcher(proxy);
       } else {
-        const choice = await prompt(`https://whois.ru/${name}.ru`);
+        const choice = await prompt(`https://whois.ru/${asciiDomain(domain)}`);
         if (choice !== "continue") {
           stopped = true;
           console.error(
@@ -115,33 +152,75 @@ export async function whoisStage(names: string[], parallel: number, o: WhoisOpts
     return resolving;
   };
 
-  const one = async (name: string): Promise<string> => {
+  const one = async (domain: string): Promise<string> => {
     for (let attempt = 0; attempt < 3;) {
       await resolving;
       if (stopped) break;
       const seen = epoch;
       try {
-        const res = await doFetch(`https://whois.ru/${name}.ru`, { signal: AbortSignal.timeout(20_000) });
+        const res = await doFetch(`https://whois.ru/${asciiDomain(domain)}`, { signal: AbortSignal.timeout(20_000) });
         const w = parseWhois(await res.text());
-        if (w.kind === "free") return `FREE ${name}`;
-        if (w.kind === "taken") return `taken-whois ${name} (${w.state})`;
+        if (w.kind === "free") return `FREE ${domain}`;
+        if (w.kind === "taken") return `taken-whois ${domain} (${w.state})`;
         if (w.kind === "captcha") {
-          await resolveCaptcha(name, seen);
+          await resolveCaptcha(domain, seen);
           continue; // a captcha is not a failed attempt
         }
       } catch { /* timeout or network error: retry */ }
       attempt++;
       await new Promise((r) => setTimeout(r, o.retryMs ?? 2000));
     }
-    return `ERR ${name}`;
+    return `ERR ${domain}`;
   };
-  return await pool(names, parallel, one);
+  return await pool(domains, parallel, one);
 }
 
-/** Check names; returns sorted result lines. */
-export async function check(names: string[], whoisParallel: number, o: WhoisOpts = {}): Promise<string[]> {
-  const dns = await pool(names, 40, async (n) => [n, await delegated(n, o.resolve)] as const);
+const BOOTSTRAP_URL = "https://data.iana.org/rdap/dns.json";
+
+async function loadBootstrap(doFetch: typeof fetch): Promise<Map<string, string>> {
+  try {
+    const res = await doFetch(BOOTSTRAP_URL, { signal: AbortSignal.timeout(20_000) });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return parseBootstrap(await res.json());
+  } catch (e) {
+    throw new Error(`cannot load the RDAP bootstrap ${BOOTSTRAP_URL}: ${(e as Error).message}`);
+  }
+}
+
+/** RDAP: 200 taken, 404 FREE, 429 waits Retry-After and retries, anything else ERR. */
+async function rdapStage(domains: string[], parallel: number, base: Map<string, string>, o: WhoisOpts) {
+  const doFetch = (o.fetcher ?? defaultFetcher)();
+  const one = async (domain: string): Promise<string> => {
+    const url = base.get(zoneOf(domain));
+    if (!url) return `UNKNOWN ${domain}`; // shortcut: zones without RDAP stay UNKNOWN until port 43 whois lands
+    for (let attempt = 0; attempt < 3; attempt++) {
+      let wait = o.retryMs ?? 2000;
+      try {
+        const res = await doFetch(`${url}domain/${asciiDomain(domain)}`, { signal: AbortSignal.timeout(20_000) });
+        await res.body?.cancel();
+        if (res.status === 200) return `taken-rdap ${domain}`;
+        if (res.status === 404) return `FREE ${domain}`;
+        if (res.status !== 429) break;
+        wait = Math.min(retryAfterMs(res.headers.get("retry-after")) ?? wait, 60_000);
+      } catch { /* timeout or network error: retry */ }
+      if (attempt < 2) await new Promise((r) => setTimeout(r, wait)); // no wait after the last try
+    }
+    return `ERR ${domain}`;
+  };
+  return await pool(domains, parallel, one);
+}
+
+/** Check full domains; returns sorted result lines. Throws if a needed RDAP bootstrap cannot be loaded. */
+export async function check(domains: string[], parallel: number, o: WhoisOpts = {}): Promise<string[]> {
+  const needRdap = domains.some((d) => zoneOf(d) !== "ru");
+  const base = needRdap ? await loadBootstrap((o.fetcher ?? defaultFetcher)()) : new Map<string, string>();
+  const dns = await pool(domains, 40, async (d) => [d, await delegated(asciiDomain(d), o.resolve)] as const);
   const rest = dns.filter(([, d]) => !d).map(([n]) => n);
   const taken = dns.filter(([, d]) => d).map(([n]) => `taken-delegated ${n}`);
-  return sortLines([...taken, ...await whoisStage(rest, whoisParallel, o)]);
+  const ru = rest.filter((d) => zoneOf(d) === "ru");
+  return sortLines([
+    ...taken,
+    ...await whoisStage(ru, parallel, o),
+    ...await rdapStage(rest.filter((d) => zoneOf(d) !== "ru"), parallel, base, o),
+  ]);
 }
