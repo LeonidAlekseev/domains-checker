@@ -1,4 +1,4 @@
-#!/usr/bin/env -S deno run --allow-net=1.1.1.1,whois.ru --allow-env=CONS,VOWS,WHOIS_P
+#!/usr/bin/env -S deno run --allow-net=1.1.1.1,whois.ru --allow-env=CONS,VOWS,WHOIS_P --allow-read=/dev/tty,CONIN$
 /**
  * domains-checker — mass check of free .ru domains.
  *
@@ -10,6 +10,7 @@ import denoJson from "../deno.json" with { type: "json" };
 import { check, parseNames } from "./check.ts";
 import { defaultSets, names, parseList, warnTooMany } from "./gen.ts";
 import { isNice } from "./nice.ts";
+import { ttyPrompt } from "./prompt.ts";
 
 const HELP = `domains-checker ${denoJson.version} — mass check of free .ru domains.
 
@@ -17,12 +18,15 @@ Usage:
   domains-checker gen MASK [--nice]
                                print every name matching the mask, one per line;
                                --nice keeps only pronounceable names
-  domains-checker check        read names from stdin, print FREE / taken-delegated / taken-whois / ERR
+  domains-checker check [--proxy URL]...
+                               read names from stdin, print FREE / taken-delegated / taken-whois / ERR;
+                               on a whois.ru captcha: next --proxy, else ask on the terminal, else stop
 
 Mask: C consonant, V vowel, D digit, L letter, A any of a-z 0-9 -; lowercase letters, digits and - are literals.
 Env:  CONS, VOWS (space-separated letters for C and V; default vowels a e i o u y), WHOIS_P (whois parallelism, default 2).
 Example: domains-checker gen CVCV | domains-checker check > result.txt
 
+  --proxy URL     proxy for whois.ru only (http, https, socks5, socks5h); repeatable, used one per captcha
   -V, --version   print version
   -h, --help      show this help`;
 
@@ -59,6 +63,8 @@ async function gen(mask: string | undefined, nice: boolean) {
 async function main() {
   const args = parseArgs(Deno.args, {
     boolean: ["help", "version", "nice"],
+    collect: ["proxy"],
+    string: ["proxy"],
     alias: { h: "help", V: "version" },
     unknown: (arg) => !arg.startsWith("-") || fail(`Unknown option ${arg}, see --help`),
   });
@@ -67,10 +73,16 @@ async function main() {
   const [cmd, ...rest] = args._.map(String);
   if (cmd === "gen" && rest.length <= 1) return await gen(rest[0], args.nice);
   if (cmd === "check" && !rest.length && !args.nice) {
+    const proxies = args.proxy as string[];
+    for (const p of proxies) {
+      if (!/^(https?|socks5h?):\/\/./.test(p)) fail(`--proxy ${p}: use http://, https://, socks5:// or socks5h://`);
+    }
     const whoisParallel = Number(Deno.env.get("WHOIS_P") || 2);
     if (!(whoisParallel >= 1)) fail("WHOIS_P must be a positive number");
     const input = await new Response(Deno.stdin.readable).text();
-    for (const line of await check(parseNames(input), Math.floor(whoisParallel))) console.log(line);
+    for (const line of await check(parseNames(input), Math.floor(whoisParallel), { proxies, prompt: ttyPrompt })) {
+      console.log(line);
+    }
     return;
   }
   fail(HELP);

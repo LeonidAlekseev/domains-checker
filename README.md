@@ -41,7 +41,7 @@ checks them: first quickly over DNS, then the rest through whois. No `dig` or `c
 #   put it on your PATH as domains-checker
 
 # Option 2: from JSR (needs Deno 2+)
-deno install -g -n domains-checker --allow-net=1.1.1.1,whois.ru --allow-env=CONS,VOWS,WHOIS_P \
+deno install -g -n domains-checker --allow-net=1.1.1.1,whois.ru --allow-env=CONS,VOWS,WHOIS_P --allow-read=/dev/tty,CONIN$ \
   jsr:@leonidalekseev/domains-checker
 
 # Option 3: from source (needs Deno 2+)
@@ -130,9 +130,21 @@ CONS="b d l m n r t v" VOWS="a o e i" domains-checker gen CVCVC | domains-checke
 
 ## Troubleshooting
 
-#### `captcha: whois.ru blocked, stop and retry later`
+#### `captcha: whois.ru blocked ...`
 
-whois.ru asked for a captcha. Stop, wait, lower `WHOIS_P`, and run again; names that were not checked are marked `ERR`.
+whois.ru asked for a captcha. From then on no new whois.ru request starts; results already obtained are kept. Then:
+
+1. If another `--proxy URL` is left, `check` switches to it and continues. `--proxy` is repeatable, applies to whois.ru
+   only (DNS is not proxied) and is used one per captcha; the first requests go direct. Schemes: `http://`, `https://`,
+   `socks5://`, `socks5h://` (`socks4://` is rejected by Deno). Add the proxy host to `--allow-net`.
+2. Otherwise, with a terminal, it prints `https://whois.ru/<name>.ru` to stderr. Pass the captcha in a browser, then
+   press Enter to continue or `q` + Enter to stop. The prompt reads the controlling terminal (`/dev/tty`, `CONIN$` on
+   Windows), so it works in `gen | check`. If the captcha comes back, it asks again.
+3. Without a terminal (cron, CI) it stops with a message on stderr.
+
+On stop, names that were not checked are marked `ERR`. This is not guaranteed to help: if whois.ru ties the captcha to
+your browser session rather than your IP, passing it in a browser or changing the proxy may change nothing. Then wait,
+lower `WHOIS_P` and run again.
 
 #### `ERR name` in the results
 
