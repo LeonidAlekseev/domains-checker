@@ -89,8 +89,9 @@ Names that `.ru` does not allow are skipped: shorter than 2 or longer than 63 ch
 ### `--nice`
 
 Keeps only pronounceable names. Each letter part of a name (digits and `-` split it) must have a vowel, no banned
-letters (`q x w j c y`), no doubled letters, at most two consonants or two vowels in a row, and only common consonant
-clusters such as `st`, `br`, `nd`. Everything is defined in `src/nice.ts`.
+letters (`q x w j c y` — so `y` never passes, although it counts as a vowel elsewhere), no doubled letters, at most two
+consonants or two vowels in a row, and only common consonant clusters such as `st`, `br`, `nd`. Everything is defined in
+`src/nice.ts`.
 
 ### Input of `check`
 
