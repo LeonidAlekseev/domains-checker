@@ -1,0 +1,27 @@
+{
+  "name": "@leonidalekseev/domains-checker",
+  "version": "0.1.0",
+  "license": "MIT",
+  "exports": "./src/main.ts",
+  "imports": {
+    "@std/assert": "jsr:@std/assert@^1.0.19",
+    "@std/cli": "jsr:@std/cli@^1"
+  },
+  "tasks": {
+    "start": "deno run --allow-net=1.1.1.1,whois.ru --allow-env=CONS,VOWS,WHOIS_P src/main.ts",
+    "test": "deno test",
+    "check": "deno fmt --check && deno lint && deno check src/main.ts tests/",
+    "compile": "deno compile --allow-net=1.1.1.1,whois.ru --allow-env=CONS,VOWS,WHOIS_P -o dist/domains-checker src/main.ts"
+  },
+  "fmt": {
+    "lineWidth": 120
+  },
+  "publish": {
+    "include": [
+      "src/",
+      "README.md",
+      "LICENSE",
+      "deno.json"
+    ]
+  }
+}
