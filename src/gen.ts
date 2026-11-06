@@ -8,9 +8,11 @@ export interface Sets {
 const LETTERS = [..."abcdefghijklmnopqrstuvwxyz"];
 const DIGITS = [..."0123456789"];
 
+export const VOWELS = "aeiouy"; // y is a vowel everywhere
+
 /** Default letter sets: six vowels (y included), the other 20 letters as consonants. */
 export function defaultSets(): Sets {
-  const vows = [..."aeiouy"];
+  const vows = [...VOWELS];
   return { cons: LETTERS.filter((l) => !vows.includes(l)), vows };
 }
 
@@ -37,6 +39,14 @@ function classes(mask: string, sets: Sets): string[][] {
 /** Number of combinations before the .ru filter. */
 export function countNames(mask: string, sets: Sets): number {
   return classes(mask, sets).reduce((n, set) => n * set.length, 1);
+}
+
+const WARN_ABOVE = 1_000_000;
+
+/** Warning text when the mask yields more than a million combinations, else undefined. */
+export function warnTooMany(mask: string, sets: Sets): string | undefined {
+  const total = countNames(mask, sets);
+  return total > WARN_ABOVE ? `warning: mask ${mask} yields ${total} combinations` : undefined;
 }
 
 /** .ru rules: length 2–63, no leading/trailing hyphen, no `--` at positions 3–4. */

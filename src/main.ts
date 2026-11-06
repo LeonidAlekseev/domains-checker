@@ -8,7 +8,7 @@
 import { parseArgs } from "@std/cli/parse-args";
 import denoJson from "../deno.json" with { type: "json" };
 import { check, parseNames } from "./check.ts";
-import { countNames, defaultSets, names, parseList } from "./gen.ts";
+import { defaultSets, names, parseList, warnTooMany } from "./gen.ts";
 import { isNice } from "./nice.ts";
 
 const HELP = `domains-checker ${denoJson.version} — mass check of free .ru domains.
@@ -26,8 +26,6 @@ Example: domains-checker gen CVCV | domains-checker check > result.txt
   -V, --version   print version
   -h, --help      show this help`;
 
-const WARN_ABOVE = 1_000_000;
-
 function fail(message: string): never {
   console.error(message);
   Deno.exit(1);
@@ -35,11 +33,14 @@ function fail(message: string): never {
 
 async function gen(mask: string | undefined, nice: boolean) {
   if (!mask) fail("usage: domains-checker gen MASK (e.g. CVCV)");
-  const d = defaultSets();
-  const sets = { cons: parseList(Deno.env.get("CONS"), d.cons), vows: parseList(Deno.env.get("VOWS"), d.vows) };
+  const defaults = defaultSets();
+  const sets = {
+    cons: parseList(Deno.env.get("CONS"), defaults.cons),
+    vows: parseList(Deno.env.get("VOWS"), defaults.vows),
+  };
   try {
-    const total = countNames(mask, sets);
-    if (total > WARN_ABOVE) console.error(`warning: mask ${mask} yields ${total} combinations`);
+    const warning = warnTooMany(mask, sets);
+    if (warning) console.error(warning);
     // Deno.stdout.write may write partially; the stream writer writes everything.
     const out = Deno.stdout.writable.getWriter();
     const enc = new TextEncoder();
@@ -65,11 +66,11 @@ async function main() {
   if (args.version) return console.log(denoJson.version);
   const [cmd, ...rest] = args._.map(String);
   if (cmd === "gen" && rest.length <= 1) return await gen(rest[0], args.nice);
-  if (cmd === "check" && !rest.length) {
-    const p = Number(Deno.env.get("WHOIS_P") || 2);
-    if (!(p >= 1)) fail("WHOIS_P must be a positive number");
+  if (cmd === "check" && !rest.length && !args.nice) {
+    const whoisParallel = Number(Deno.env.get("WHOIS_P") || 2);
+    if (!(whoisParallel >= 1)) fail("WHOIS_P must be a positive number");
     const input = await new Response(Deno.stdin.readable).text();
-    for (const line of await check(parseNames(input), Math.floor(p))) console.log(line);
+    for (const line of await check(parseNames(input), Math.floor(whoisParallel))) console.log(line);
     return;
   }
   fail(HELP);
