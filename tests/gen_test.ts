@@ -1,5 +1,5 @@
 import { assertEquals, assertThrows } from "@std/assert";
-import { countNames, isValidName, names } from "../src/gen.ts";
+import { countNames, defaultSets, isValidName, names, warnTooMany } from "../src/gen.ts";
 
 const sets = { cons: ["b", "c"], vows: ["a", "e"] };
 const list = (mask: string) => [...names(mask, sets)];
@@ -42,4 +42,11 @@ Deno.test(".ru filter", () => {
 Deno.test("count is the product of class sizes", () => {
   assertEquals(countNames("CVCV", sets), 16);
   assertEquals(countNames("CCCCCCCC", { cons: Array(21).fill("x"), vows: [] }), 21 ** 8);
+});
+
+Deno.test("warnTooMany: only above one million", () => {
+  const sets = defaultSets();
+  assertEquals(warnTooMany("CCCCC", sets), "warning: mask CCCCC yields 3200000 combinations");
+  assertEquals(warnTooMany("CCCC", sets), undefined);
+  assertEquals(warnTooMany("DDDDDD", sets), undefined); // exactly 1_000_000
 });

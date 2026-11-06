@@ -36,17 +36,28 @@ export async function pool<T, R>(items: T[], limit: number, fn: (item: T) => Pro
   return out;
 }
 
+const DNS_TIMEOUT_MS = 3000;
+const DNS_ATTEMPTS = 2;
+
+type Resolver = (domain: string, signal: AbortSignal) => Promise<unknown>;
+
+const resolveNs: Resolver = (domain, signal) =>
+  Deno.resolveDns(domain, "NS", { nameServer: { ipAddr: "1.1.1.1" }, signal });
+
 /**
  * Deno.resolveDns throws NotFound for both NXDOMAIN and NODATA (verified against 1.1.1.1), so only a
  * successful NS answer counts as delegated; everything else goes on to whois, which is authoritative.
  */
-async function delegated(name: string): Promise<boolean> {
-  try {
-    await Deno.resolveDns(`${name}.ru`, "NS", { nameServer: { ipAddr: "1.1.1.1" } });
-    return true;
-  } catch {
-    return false;
+export async function delegated(name: string, resolve: Resolver = resolveNs): Promise<boolean> {
+  for (let attempt = 0; attempt < DNS_ATTEMPTS; attempt++) {
+    try {
+      await resolve(`${name}.ru`, AbortSignal.timeout(DNS_TIMEOUT_MS));
+      return true;
+    } catch (e) {
+      if (e instanceof Deno.errors.NotFound) return false; // definitive answer, retrying won't help
+    }
   }
+  return false; // timed out every time: treat as not delegated, whois decides
 }
 
 async function whois(name: string): Promise<string> {

@@ -1,6 +1,7 @@
 /** `--nice` heuristic: keep only names that sound good. All rules live in this file; edit the lists below. */
 
-export const VOWELS = "aeiouy"; // y is a vowel everywhere
+import { VOWELS } from "./gen.ts";
+
 export const BANNED = "qxwjcy"; // ambiguous to read
 export const MAX_CONS_RUN = 2;
 export const MAX_VOWEL_RUN = 2;
