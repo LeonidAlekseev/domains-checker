@@ -7,6 +7,7 @@ import {
   parseBootstrap,
   parseNames,
   parseWhois,
+  parseZones,
   retryAfterMs,
   sortLines,
   toDomains,
@@ -373,4 +374,11 @@ Deno.test("whoisStage: the proxy switch message has no credentials", async () =>
   }
   assertEquals(notes.length, 1);
   assertEquals(notes[0].includes("s3cret") || notes[0].includes("bob"), false);
+});
+
+Deno.test("parseZones: dot-separated labels are zones, anything else is rejected", () => {
+  assertEquals(parseZones("co.uk"), ["co.uk"]);
+  assertEquals(parseZones("рф"), ["рф"]);
+  assertEquals(parseZones("ru, .COM"), ["ru", "com"]);
+  for (const bad of ["a..b", "ru;com", "ru.", "ru,,com", ".", ""]) assertEquals(parseZones(bad), undefined, bad);
 });

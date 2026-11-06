@@ -7,7 +7,7 @@
 
 import { parseArgs } from "@std/cli/parse-args";
 import denoJson from "../deno.json" with { type: "json" };
-import { check, maskProxy, parseNames, sortLines, toDomains } from "./check.ts";
+import { check, maskProxy, parseNames, parseZones, sortLines, toDomains } from "./check.ts";
 import { defaultSets, names, parseList, warnTooMany } from "./gen.ts";
 import { isNice } from "./nice.ts";
 import { ttyPrompt } from "./prompt.ts";
@@ -86,10 +86,8 @@ async function main() {
         fail(`--proxy ${maskProxy(p)}: use http://, https://, socks5:// or socks5h://`);
       }
     }
-    const zones = (args.tld ?? "ru").toLowerCase().split(",").map((z) => z.trim().replace(/^\./, ""));
-    for (const z of zones) {
-      if (!/^[\p{L}\p{N}-]+$/u.test(z)) fail(`--tld ${args.tld}: zones are comma-separated, like ru,com`);
-    }
+    const zones = parseZones(args.tld ?? "ru");
+    if (!zones) fail(`--tld ${args.tld}: zones are comma-separated, like ru,com or co.uk`);
     const whoisParallel = Number(Deno.env.get("WHOIS_P") || 2);
     if (!(whoisParallel >= 1)) fail("WHOIS_P must be a positive number");
     const input = await new Response(Deno.stdin.readable).text();

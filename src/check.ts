@@ -40,6 +40,12 @@ export function toDomains(names: string[], zones: string[]): { domains: string[]
   return { domains: [...domains], unknown: [...unknown] };
 }
 
+/** `--tld` value to zones (leading dot stripped, lowercase); undefined if a zone is not dot-separated labels. */
+export function parseZones(tld: string): string[] | undefined {
+  const zones = tld.toLowerCase().split(",").map((z) => z.trim().replace(/^\./, ""));
+  return zones.every((z) => /^[\p{L}\p{N}-]+(\.[\p{L}\p{N}-]+)*$/u.test(z)) ? zones : undefined;
+}
+
 /** A proxy URL for messages: user and password replaced by ***. */
 export function maskProxy(proxy: string): string {
   try {
