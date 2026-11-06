@@ -41,7 +41,7 @@
 #   положите в PATH под именем domains-checker
 
 # Вариант 2: из JSR (нужен Deno 2+)
-deno install -g -n domains-checker --allow-net=1.1.1.1,whois.ru --allow-env=CONS,VOWS,WHOIS_P \
+deno install -g -n domains-checker --allow-net=1.1.1.1,whois.ru --allow-env=CONS,VOWS,WHOIS_P --allow-read=/dev/tty,CONIN$ \
   jsr:@leonidalekseev/domains-checker
 
 # Вариант 3: из исходников (нужен Deno 2+)
@@ -130,10 +130,23 @@ CONS="b d l m n r t v" VOWS="a o e i" domains-checker gen CVCVC | domains-checke
 
 ## Решение проблем
 
-#### `captcha: whois.ru blocked, stop and retry later`
+#### `captcha: whois.ru blocked ...`
 
-whois.ru потребовал капчу. Остановитесь, подождите, уменьшите `WHOIS_P` и запустите снова; непроверенные имена помечены
-`ERR`.
+whois.ru потребовал капчу. После этого новые запросы к whois.ru не начинаются; уже полученные результаты сохраняются.
+Дальше:
+
+1. Если остался ещё один `--proxy URL`, `check` переключается на него и продолжает. `--proxy` можно повторять, он
+   действует только на whois.ru (DNS не проксируется) и берётся по одному на капчу; первые запросы идут напрямую. Схемы:
+   `http://`, `https://`, `socks5://`, `socks5h://` (`socks4://` Deno не принимает). Добавьте хост прокси в
+   `--allow-net`.
+2. Иначе, при наличии терминала, в stderr печатается `https://whois.ru/<имя>.ru`. Пройдите капчу в браузере и нажмите
+   Enter, чтобы продолжить, или `q` + Enter, чтобы остановиться. Запрос читает управляющий терминал (`/dev/tty`,
+   `CONIN$` в Windows), поэтому работает и в `gen | check`. Если капча вернулась, вопрос повторяется.
+3. Без терминала (cron, CI) программа останавливается с сообщением в stderr.
+
+При остановке непроверенные имена помечаются `ERR`. Помогает не всегда: если whois.ru привязывает капчу к сессии
+браузера, а не к IP, прохождение капчи в браузере или смена прокси могут ничего не дать. Тогда подождите, уменьшите
+`WHOIS_P` и запустите снова.
 
 #### `ERR name` в результатах
 

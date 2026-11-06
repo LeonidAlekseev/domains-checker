@@ -39,7 +39,7 @@ export async function pool<T, R>(items: T[], limit: number, fn: (item: T) => Pro
 const DNS_TIMEOUT_MS = 3000;
 const DNS_ATTEMPTS = 2;
 
-type Resolver = (domain: string, signal: AbortSignal) => Promise<unknown>;
+export type Resolver = (domain: string, signal: AbortSignal) => Promise<unknown>;
 
 const resolveNs: Resolver = (domain, signal) =>
   Deno.resolveDns(domain, "NS", { nameServer: { ipAddr: "1.1.1.1" }, signal });
@@ -60,27 +60,88 @@ export async function delegated(name: string, resolve: Resolver = resolveNs): Pr
   return false; // timed out every time: treat as not delegated, whois decides
 }
 
-async function whois(name: string): Promise<string> {
-  for (let i = 0; i < 3; i++) {
-    try {
-      const res = await fetch(`https://whois.ru/${name}.ru`, { signal: AbortSignal.timeout(20_000) });
-      const w = parseWhois(await res.text());
-      if (w.kind === "free") return `FREE ${name}`;
-      if (w.kind === "taken") return `taken-whois ${name} (${w.state})`;
-      if (w.kind === "captcha") {
-        console.error("captcha: whois.ru blocked, stop and retry later");
-        return `ERR ${name}`;
+export type CaptchaChoice = "continue" | "stop" | "no-terminal";
+
+export type WhoisOpts = {
+  /** Returns the fetch to use, optionally through a proxy URL. */
+  fetcher?: (proxy?: string) => typeof fetch;
+  /** Proxies to rotate through, one per captcha, before asking the user. */
+  proxies?: string[];
+  /** Ask the user to pass the captcha at `link`. */
+  prompt?: (link: string) => Promise<CaptchaChoice>;
+  resolve?: Resolver;
+  retryMs?: number;
+};
+
+const defaultFetcher = (proxy?: string): typeof fetch => {
+  if (!proxy) return fetch;
+  const client = Deno.createHttpClient({ proxy: { url: proxy } }); // one client per proxy, so connections are reused
+  return (url, init) => fetch(url, { ...init, client });
+};
+
+/**
+ * whois.ru stage. On the first captcha no new request starts (requests already in flight may finish)
+ * until a proxy is swapped in or the user continues; on stop the unchecked names become ERR.
+ */
+export async function whoisStage(names: string[], parallel: number, o: WhoisOpts = {}): Promise<string[]> {
+  const fetcher = o.fetcher ?? defaultFetcher;
+  const proxies = [...o.proxies ?? []];
+  const prompt = o.prompt ?? (() => Promise.resolve<CaptchaChoice>("no-terminal"));
+  let doFetch = fetcher();
+  let epoch = 0; // bumped after each resolved captcha; a captcha from an older epoch is already handled
+  let stopped = false;
+  let resolving: Promise<void> | undefined;
+
+  const resolveCaptcha = (name: string, seen: number) => {
+    if (stopped || seen !== epoch) return resolving;
+    resolving ??= (async () => {
+      const proxy = proxies.shift();
+      if (proxy) {
+        console.error(`captcha: whois.ru blocked, switching to proxy ${proxy}`);
+        doFetch = fetcher(proxy);
+      } else {
+        const choice = await prompt(`https://whois.ru/${name}.ru`);
+        if (choice !== "continue") {
+          stopped = true;
+          console.error(
+            choice === "stop"
+              ? "captcha: whois.ru blocked, stopped by user; unchecked names are ERR"
+              : "captcha: whois.ru blocked and no terminal to ask, stop and retry later",
+          );
+        }
       }
-    } catch { /* timeout or network error: retry */ }
-    await new Promise((r) => setTimeout(r, 2000));
-  }
-  return `ERR ${name}`;
+      epoch++;
+    })().finally(() => resolving = undefined);
+    return resolving;
+  };
+
+  const one = async (name: string): Promise<string> => {
+    for (let attempt = 0; attempt < 3;) {
+      await resolving;
+      if (stopped) break;
+      const seen = epoch;
+      try {
+        const res = await doFetch(`https://whois.ru/${name}.ru`, { signal: AbortSignal.timeout(20_000) });
+        const w = parseWhois(await res.text());
+        if (w.kind === "free") return `FREE ${name}`;
+        if (w.kind === "taken") return `taken-whois ${name} (${w.state})`;
+        if (w.kind === "captcha") {
+          await resolveCaptcha(name, seen);
+          continue; // a captcha is not a failed attempt
+        }
+      } catch { /* timeout or network error: retry */ }
+      attempt++;
+      await new Promise((r) => setTimeout(r, o.retryMs ?? 2000));
+    }
+    return `ERR ${name}`;
+  };
+  return await pool(names, parallel, one);
 }
 
 /** Check names; returns sorted result lines. */
-export async function check(names: string[], whoisParallel: number): Promise<string[]> {
-  const dns = await pool(names, 40, async (n) => [n, await delegated(n)] as const);
+export async function check(names: string[], whoisParallel: number, o: WhoisOpts = {}): Promise<string[]> {
+  const dns = await pool(names, 40, async (n) => [n, await delegated(n, o.resolve)] as const);
   const rest = dns.filter(([, d]) => !d).map(([n]) => n);
   const taken = dns.filter(([, d]) => d).map(([n]) => `taken-delegated ${n}`);
-  return sortLines([...taken, ...await pool(rest, whoisParallel, whois)]);
+  return sortLines([...taken, ...await whoisStage(rest, whoisParallel, o)]);
 }
